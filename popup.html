@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <style>
+    :root {
+      --brand-green: #07C160;          
+      --brand-green-dark: #06AD56;     
+      --brand-green-light: #E6F9F0;    
+      --brand-green-soft: #B7ECD1;     
+      --brand-green-text: #0A7A42;     
+      --brand-green-rgb: 7, 193, 96;   
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #ffffff;
+    }
+
+    body {
+      width: 340px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      color: #1f2937; 
+      font-size: 13px;
+    }
+
+    .app-container {
+      padding: 16px;
+      background: #ffffff;
+    }
+
+    .header { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 14px; position: relative; }
+    .logo-img {
+      width: 30px; height: 30px; border-radius: 8px; object-fit: cover; flex-shrink: 0;
+      background: #f3f4f6;
+    }
+    .header-text { flex: 1; min-width: 0; }
+    .header-text h1 { margin: 0 0 3px; font-size: 15px; font-weight: 600; color: #111827; }
+    .header-text p { margin: 0; font-size: 11px; color: #6b7280; }
+
+    .header-actions {
+      position: absolute; right: 0; top: 0;
+      display: flex; gap: 4px; flex-shrink: 0;
+    }
+    .icon-btn {
+      width: 24px; height: 24px; border: none; border-radius: 4px;
+      background: #f3f4f6; color: #9ca3af;
+      cursor: pointer; display: flex; align-items: center; justify-content: center;
+      transition: all 0.15s;
+    }
+    .icon-btn:hover { background: #e5e7eb; color: #4b5563; }
+    .icon-btn.pinned { background: var(--brand-green); color: #fff; }
+    .icon-btn.pinned:hover { background: var(--brand-green-dark); }
+
+    .article-title-box {
+      background: #f9fafb; border: 1px solid #e5e7eb; border-radius: 8px;
+      padding: 8px 10px; margin-bottom: 12px;
+    }
+    .article-label { font-size: 11px; color: #9ca3af; margin-bottom: 2px; }
+    .article-name {
+      font-size: 13px; font-weight: 500; color: #374151; line-height: 1.35;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; word-break: break-all;
+    }
+
+    .section-title { font-size: 12px; color: #6b7280; margin-bottom: 6px; font-weight: 500; }
+
+    .options-container { display: flex; flex-direction: column; gap: 8px; margin-bottom: 6px; }
+    .option-card {
+      border: 1px solid #e5e7eb; border-radius: 8px; padding: 10px; cursor: pointer;
+      transition: all 0.2s ease; background: #ffffff; display: flex; gap: 10px; align-items: flex-start; min-width: 0;
+    }
+    .option-card:hover { border-color: #d1d5db; }
+    .option-card.active {
+      border-color: var(--brand-green);
+      background: var(--brand-green-light);
+      box-shadow: 0 0 0 1px var(--brand-green);
+    }
+
+    .radio-circle {
+      width: 18px; height: 18px; border-radius: 50%; border: 2px solid #d1d5db;
+      display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 1px; background: #fff;
+    }
+    .option-card.active .radio-circle { border-color: var(--brand-green); }
+    .radio-circle::after {
+      content: ''; width: 8px; height: 8px; border-radius: 50%; background: var(--brand-green); transform: scale(0); transition: transform 0.2s;
+    }
+    .option-card.active .radio-circle::after { transform: scale(1); }
+
+    .option-content { flex: 1; min-width: 0; }
+    .option-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px; min-width: 0; }
+    .title-wrap { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .option-icon { display: flex; align-items: center; justify-content: center; flex-shrink: 0; color: #9CA3AF; transition: color 0.2s; }
+    .option-card.active .option-icon { color: var(--brand-green); }
+    .option-title { font-weight: 600; font-size: 13px; color: #111827; }
+
+    .tag { font-size: 10px; padding: 2px 6px; border-radius: 4px; background: #f3f4f6; color: #6b7280; flex-shrink: 0; margin-left: 8px; transition: all 0.2s; }
+    .option-card.active .tag { background: var(--brand-green-soft); color: var(--brand-green-text); }
+
+    .option-desc { font-size: 11px; color: #6b7280; line-height: 1.35; }
+
+    .archive-mode-box {
+      margin: -2px 0 10px 0;
+      padding: 10px 12px;
+      background: #f9fafb;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+    }
+    .archive-mode-label {
+      font-size: 11px; color: #9ca3af; margin-bottom: 6px;
+      display: flex; align-items: center; gap: 4px;
+    }
+    .archive-mode-label::before {
+      content: ''; display: inline-block; width: 3px; height: 10px; background: var(--brand-green); border-radius: 2px;
+    }
+    .archive-mode-options { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+    .archive-mode-btn {
+      display: flex; align-items: center; justify-content: center; gap: 5px;
+      padding: 6px 4px; background: #fff; border: 1px solid #e5e7eb; border-radius: 6px;
+      color: #6b7280; font-size: 12px; font-weight: 500; font-family: inherit;
+      cursor: pointer; transition: all 0.2s;
+    }
+    .archive-mode-btn:hover { border-color: #d1d5db; color: #374151; }
+    .archive-mode-btn.active {
+      background: var(--brand-green-light);
+      border-color: var(--brand-green);
+      color: var(--brand-green);
+    }
+    .archive-mode-btn svg { flex-shrink: 0; }
+
+    .actions { display: flex; flex-direction: column; gap: 8px; }
+    button.export-btn {
+      width: 100%; padding: 10px; background: var(--brand-green); color: #fff; border: none; border-radius: 8px;
+      font-size: 14px; font-weight: 600; cursor: pointer; transition: background 0.2s; display: flex; align-items: center; justify-content: center; gap: 8px;
+    }
+    button.export-btn:hover { background: var(--brand-green-dark); }
+    button.export-btn:disabled { background: var(--brand-green-soft); cursor: not-allowed; }
+
+    .options-link {
+      display: flex; align-items: center; justify-content: center; gap: 6px; padding: 7px;
+      color: #6b7280; font-size: 12px; cursor: pointer; text-decoration: none; background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
+      transition: all 0.15s;
+    }
+    .options-link:hover { color: #374151; background: #f9fafb; }
+
+    #status { font-size: 11px; text-align: center; color: #6b7280; }
+    #status:not(:empty) { margin-top: 8px; }
+    .error { color: #ef4444; }
+    .success { color: var(--brand-green); }
+  </style>
+</head>
+<body>
+  <div class="app-container">
+    <div class="header">
+      <img class="logo-img" src="icons/icon128.png" alt="Logo">
+      <div class="header-text">
+        <h1>微信文章转 Markdown</h1>
+        <p>将当前公众号文章保存为 Markdown 文件</p>
+      </div>
+      <div class="header-actions">
+        <button class="icon-btn" id="pinBtn" title="固定悬浮窗（在页面上常驻）">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 17v5"></path>
+            <path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"></path>
+          </svg>
+        </button>
+        <button class="icon-btn" id="closeBtn" title="关闭">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+      </div>
+    </div>
+
+    <div class="article-title-box">
+      <div class="article-label">当前文档</div>
+      <div class="article-name" id="articleTitle">正在获取...</div>
+    </div>
+
+    <div class="section-title">图片处理方式</div>
+
+    <div class="options-container">
+      <div class="option-card" data-mode="online">
+        <div class="radio-circle"></div>
+        <div class="option-content">
+          <div class="option-header">
+            <div class="title-wrap">
+              <span class="option-icon">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                  <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+              </span>
+              <span class="option-title">保留在线链接</span>
+            </div>
+            <span class="tag">轻量</span>
+          </div>
+          <div class="option-desc">直接引用网络图片地址，文件更轻</div>
+        </div>
+      </div>
+
+      <div class="option-card" data-mode="download">
+        <div class="radio-circle"></div>
+        <div class="option-content">
+          <div class="option-header">
+            <div class="title-wrap">
+              <span class="option-icon">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                  <path d="M7 10l5 5 5-5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="M12 15V3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                </svg>
+              </span>
+              <span class="option-title">下载到本地</span>
+            </div>
+            <span class="tag">推荐</span>
+          </div>
+          <div class="option-desc">图片保存到本地目录，随 Markdown 一起导出</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="archive-mode-box" id="archiveModeBox" style="display:none;">
+      <div class="archive-mode-label">归档方式</div>
+      <div class="archive-mode-options">
+        <!-- ★ 添加了 title 提示 -->
+        <button class="archive-mode-btn" data-mode="per-article" type="button" title="每篇文章单独一个文件夹，附件随文归档。">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+            <line x1="9" y1="13" x2="15" y2="13"></line>
+            <line x1="9" y1="17" x2="13" y2="17"></line>
+          </svg>
+          <span>逐篇归档</span>
+        </button>
+        <!-- ★ 添加了 title 提示 -->
+        <button class="archive-mode-btn" data-mode="shared" type="button" title="所有文章与附件置于同一文件夹，文章平级，附件混排。">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="7" height="7" rx="1"></rect>
+            <rect x="14" y="3" width="7" height="7" rx="1"></rect>
+            <rect x="14" y="14" width="7" height="7" rx="1"></rect>
+            <rect x="3" y="14" width="7" height="7" rx="1"></rect>
+          </svg>
+          <span>平铺归档</span>
+        </button>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button id="exportBtn" class="export-btn">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+        导出当前文章
+      </button>
+      <button id="openOptions" class="options-link">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+        详细配置
+      </button>
+    </div>
+
+    <div id="status"></div>
+  </div>
+
+  <script src="lib/defaults.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
