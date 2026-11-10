@@ -247,6 +247,23 @@
     }
     .wx-md-link:hover { background: #f9fafb; color: #374151; }
 
+    /* 官网 / 问题反馈：压在「详细配置」下面的一条窄行，不额外占高度。
+       上间距 = .wx-md-actions 的 gap（6px）；下间距用负 margin 抵掉面板
+       底部 padding 的一半，让这一行的上下空白都是 6px，不再一大一小。 */
+    .wx-md-links {
+      display: flex; align-items: center; justify-content: center; gap: 2px;
+      margin: 0 0 -6px;
+    }
+    .wx-md-links[hidden] { display: none; }
+    .wx-md-site-link {
+      display: inline-flex; align-items: center; gap: 4px;
+      padding: 1px 7px; border-radius: 5px;
+      color: #6b7280; font-size: 11.5px; line-height: 16px;
+      text-decoration: none; cursor: pointer; transition: color 0.15s, background 0.15s;
+    }
+    .wx-md-site-link:hover { color: var(--brand-green-text); background: var(--brand-green-light); }
+    .wx-md-links-sep { width: 1px; height: 9px; background: #e5e7eb; flex: 0 0 auto; }
+
     .wx-md-status {
       font-size: 11px;
       text-align: center;
@@ -373,6 +390,18 @@
             </svg>
             详细配置
           </button>
+          <!-- 官网 / 问题反馈：地址统一在 lib/defaults.js 的 WXMD_LINKS 里改 -->
+          <div class="wx-md-links" id="wxMdSiteLinks" hidden>
+            <a class="wx-md-site-link" id="wxMdLinkHome" target="_blank" rel="noopener noreferrer">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
+              官网
+            </a>
+            <span class="wx-md-links-sep" id="wxMdLinkHomeSep"></span>
+            <a class="wx-md-site-link" id="wxMdLinkFeedback" target="_blank" rel="noopener noreferrer">
+              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8z"></path></svg>
+              问题反馈
+            </a>
+          </div>
         </div>
 
         <div class="wx-md-status" id="wxMdStatus"></div>
@@ -398,6 +427,35 @@
   const kbdEl = $('#wxMdKbd');
   const optCards = Array.from($$('.wx-md-opt'));
   const archiveBtns = Array.from($$('.wx-md-archive-btn'));
+
+  // ---------- 官网 / 问题反馈 ----------
+  // 地址只写在 lib/defaults.js 的 WXMD_LINKS 一处，与弹窗、配置页共用；
+  // 这里挂的是普通 <a target="_blank">—— 内容脚本拿不到 chrome.tabs，锚点跳新标签最稳。
+  (function mountSiteLinks() {
+    const links = (typeof WXMD_LINKS !== 'undefined' && WXMD_LINKS) || {};
+    const box = $('#wxMdSiteLinks');
+    if (!box) return;
+
+    const mount = (id, url) => {
+      const el = $('#' + id);
+      if (!el) return false;
+      if (!url) {
+        el.remove();
+        return false;
+      }
+      el.setAttribute('href', url);
+      el.setAttribute('title', url);
+      return true;
+    };
+
+    const hasHome = mount('wxMdLinkHome', links.homepage);
+    const hasFeedback = mount('wxMdLinkFeedback', links.feedback);
+    const sep = $('#wxMdLinkHomeSep');
+    if (sep && !(hasHome && hasFeedback)) sep.remove();
+
+    // 两个地址都没配时整行不占位，不留下一条空行
+    box.hidden = !(hasHome || hasFeedback);
+  })();
 
   const isMac = /Mac|iPod|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
   if (kbdEl) kbdEl.textContent = isMac ? '⌘ S' : 'Ctrl S';

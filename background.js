@@ -1,5 +1,8 @@
 // background.js —— 集中处理所有 IO（提取调度 / 路径净化 / 下载）
 importScripts('lib/defaults.js');
+// 图片引用路径的拼装规则与配置页预览共用 lib/naming.js，
+// 否则「预览显示的链接」和「md 里真实写的链接」迟早会漂移。
+importScripts('lib/naming.js');
 
 const IMG_CONCURRENCY = 4;          // 图片并发下载上限
 // 必须小于 MV3 service worker 的 30 秒空闲回收阈值。
@@ -157,6 +160,61 @@ function pickArticleData(results) {
   return null;
 }
 
+// ---------- 图片引用路径 ----------
+
+/**
+ * 取值收敛到四种已知模式，其余一律回落到 note（相对当前笔记），
+ * 保证任何脏数据都不会拼出诡异的链接。
+ */
+function normalizeImagePathMode(mode) {
+  if (typeof WXMD_NAMING !== 'undefined' && typeof WXMD_NAMING.normalizeImageRefMode === 'function') {
+    return WXMD_NAMING.normalizeImageRefMode(mode);
+  }
+  return (mode === 'relative' || mode === 'custom') ? mode : 'note';
+}
+
+/**
+ * 归一成 { mode, prefix }（含旧版 parent / vault 的迁移）。
+ * 有 naming 模块时以它为准，缺了就退回最基本的判断，保证导出不会因缺依赖崩掉。
+ */
+function resolveImageRefConfig(article) {
+  if (typeof WXMD_NAMING !== 'undefined' && typeof WXMD_NAMING.resolveImageRefConfig === 'function') {
+    return WXMD_NAMING.resolveImageRefConfig(article || {});
+  }
+  const src = article || {};
+  return {
+    mode: normalizeImagePathMode(src.imagePathMode),
+    prefix: typeof src.imageRefPrefix === 'string' ? src.imageRefPrefix : ''
+  };
+}
+
+/**
+ * 生成 Markdown 里的图片路径。
+ * 权威实现在 lib/naming.js（配置页预览用的是同一份），这里只做一层降级垫片，
+ * 防止 service worker 里 importScripts 意外失败时整篇导出崩掉。
+ */
+function makeImageRef(mode, imgDir, filename, noteFolder, prefix) {
+  if (typeof WXMD_NAMING !== 'undefined' && typeof WXMD_NAMING.buildImageRef === 'function') {
+    return WXMD_NAMING.buildImageRef(mode, imgDir, filename, noteFolder, prefix);
+  }
+  const dir = String(imgDir || '').replace(/^\/+|\/+$/g, '');
+  const rel = [dir, filename].filter(Boolean).join('/');
+  if (!rel) return '';
+  if (mode === 'relative') return rel;
+  if (mode === 'custom') {
+    let pre = String(prefix || '')
+      .replace(/\\/g, '/')
+      .replace(/\/{2,}/g, '/')
+      .replace(/ /g, '%20')
+      .replace(/\{\{noteFolder\}\}/gi, String(noteFolder || '').replace(/^\/+|\/+$/g, ''))
+      .replace(/\/{2,}/g, '/');
+    if (!pre) return rel;
+    if (!/\/$/.test(pre)) pre += '/';
+    return pre + rel;
+  }
+  return './' + rel;
+}
+
 // ---------- 核心导出 ----------
 
 async function handleExport(article) {
@@ -167,6 +225,9 @@ async function handleExport(article) {
   const imageMode = article.imageMode === 'online' ? 'online' : 'download';
   const folderMode = article.folderMode === 'shared' ? 'shared' : 'per-article';
   const images = Array.isArray(article.images) ? article.images : [];
+
+  // 图片链接在 md 里怎么写（相对笔记 / 库内模糊 / 自定义前缀）
+  const imageRef = resolveImageRefConfig(article);
 
   let markdown = article.markdown;
   let targetFolder = '';
@@ -203,7 +264,7 @@ async function handleExport(article) {
     const pathByIndex = new Map();
     items.forEach((item, i) => {
       const filename = `${item.filenameBase}.${item.realExt}`;
-      pathByIndex.set(i, imgDir ? `./${imgDir}/${filename}` : `./${filename}`);
+      pathByIndex.set(i, makeImageRef(imageRef.mode, imgDir, filename, targetFolder, imageRef.prefix));
     });
 
     // Chrome 命中同名文件时会改名成 "xxx (1).webp"，与上面预算的名字不同。
@@ -230,7 +291,7 @@ async function handleExport(article) {
           // uniquify 产生的 "a (1).webp" 含空格与括号，直接塞进 markdown 会截断链接，
           // 只把空格编码掉（括号成对出现，CommonMark 可解析）
           const realName = res.filename.replace(/ /g, '%20');
-          actualPath.set(i, imgDir ? `./${imgDir}/${realName}` : `./${realName}`);
+          actualPath.set(i, makeImageRef(imageRef.mode, imgDir, realName, targetFolder, imageRef.prefix));
         }
       } catch (err) {
         failed++;

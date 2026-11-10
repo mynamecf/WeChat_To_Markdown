@@ -103,6 +103,10 @@ async function init() {
 
 init();
 
+// 官网 / 问题反馈链接：地址只写在 lib/defaults.js 的 WXMD_LINKS 里，
+// 留空则对应链接自动隐藏。
+if (typeof WXMD_mountSiteLinks === 'function') WXMD_mountSiteLinks();
+
 // 反向同步：详细配置页 / 浮窗改了设置，弹窗实时跟上
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area !== 'local') return;

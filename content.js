@@ -19,6 +19,8 @@
     : {
         imageMode: 'download',
         folderMode: 'per-article',
+        imagePathMode: 'note',
+        imageRefPrefix: '/微信/{{noteFolder}}/',
         onlineFilename: '{{date:YYYYMMDD}}_{{title}}',
         downloadFolder: '{{date:YYYYMMDD}}_{{title}}',
         sharedFolder: '{{date:YYYYMMDD}}',
@@ -74,6 +76,21 @@
   const folderMode = (override.folderMode === 'shared' || override.folderMode === 'per-article')
     ? override.folderMode
     : (settings.folderMode === 'shared' ? 'shared' : 'per-article');
+
+  // 图片引用路径只影响 md 里的链接写法，不影响落盘位置。
+  // 逐篇 / 平铺各存一份配置，按本次的归档方式取用；旧版 parent / vault 照旧迁移。
+  // 键单独读一遍：DEFAULTS 里不含分档字段，get(DEFAULTS) 拿不到它们。
+  const rawRefCfg = await chrome.storage.local.get([
+    'perArticleImagePathMode',
+    'perArticleImageRefPrefix',
+    'sharedImagePathMode',
+    'sharedImageRefPrefix',
+    'imagePathMode',
+    'imageRefPrefix'
+  ]);
+  const imageRef = (typeof WXMD_NAMING.resolveImageRefForFolder === 'function')
+    ? WXMD_NAMING.resolveImageRefForFolder(rawRefCfg, folderMode)
+    : WXMD_NAMING.resolveImageRefConfig(rawRefCfg);
 
   // 逐篇 / 平铺各有一套图片规则，按当前归档方式取用
   const useSharedImageRule = folderMode === 'shared';
@@ -292,6 +309,8 @@
     markdown,
     imageMode,
     folderMode,
+    imagePathMode: imageRef.mode,
+    imageRefPrefix: imageRef.prefix,
     onlineFilename: resolvedOnlineFilename,
     downloadFolder: resolvedDownloadFolder,
     sharedFolder: resolvedSharedFolder,
