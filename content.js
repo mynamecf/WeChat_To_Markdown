@@ -1,7 +1,7 @@
 // content.js —— 提取文章正文并转换为 Markdown
-// 注入顺序：lib/defaults.js → lib/turndown.js → lib/turndown-plugin-gfm.js → content.js
+// 注入顺序：lib/defaults.js → lib/naming.js → lib/turndown.js → lib/turndown-plugin-gfm.js → lib/codeblock.js → content.js
 (async function () {
-  const VERSION = 'v23-2026-10-22';
+  const VERSION = 'v26-2026-11-11';
   const DEBUG = false;
   const LOG = DEBUG ? (...args) => console.log('[wechat-to-md ' + VERSION + ']', ...args) : () => {};
 
@@ -153,6 +153,18 @@
   }
 
   const clone = contentEl.cloneNode(true);
+
+  // ---------- 视频 / 语音等附件：只留在线链接 ----------
+  // 图片以外的附件一律不下载。视频在公众号里有四种形态（微信播放器 iframe、
+  // mp-common-videosnippet 自定义标签、腾讯视频、视频号），直链带 auth_key 签名会过期，
+  // 视频号的内容又是分片加密的，下下来大概率是坏文件或很快失效。
+  // 所以这里统一把载体换成 <wxmd-link> 占位，只写「能点开看」的在线地址。
+  //
+  // 放在图片统计之前：播放器里常包着封面图，外层被换掉后那张图不在正文里了，
+  // 先换成链接可以让它不被计入图片列表（否则会白下一张没人引用的封面）。
+  const attachments = collectAttachments(clone);
+  if (attachments.length > 0) LOG('attachments', attachments);
+
   const images = clone.querySelectorAll('img');
   const imageList = [];
   let blockedImages = 0;
@@ -205,9 +217,163 @@
   }
 
   // 清理脚本、样式、广告等无关节点
-  clone.querySelectorAll('script, style, iframe, .js_ad_link, .rich_media_tool').forEach(el => el.remove());
+  // 附件载体已经换成占位；这里顺带清掉没被识别出来的残留（读不出地址的播放器），
+  // 否则 Turndown 会把整个播放器 DOM 当正文输出。
+  clone.querySelectorAll(
+    'script, style, iframe, video, audio, mp-common-videosnippet, mp-common-videochannels, .js_ad_link, .rich_media_tool'
+  ).forEach(el => el.remove());
 
-  normalizeCodeBlocks(clone);
+  // ---------- 附件提取（视频 / 语音）----------
+
+  /**
+   * 收集正文里的视频 / 语音，返回 [{ kind, source, href }]，并把载体节点换成
+   * <wxmd-link> 占位（带 data-href / data-label），交给 Turndown 输出成链接。
+   */
+  function collectAttachments(root) {
+    const found = [];
+    const taken = new Set();
+    const nodes = Array.from(root.querySelectorAll(
+      'video, audio, iframe, mp-common-videosnippet, mp-common-videochannels'
+    ));
+
+    for (const el of nodes) {
+      if (!root.contains(el)) continue;
+      const holder = el.closest('mp-common-videosnippet, mp-common-videochannels') || el;
+      // 同一段视频会被「自定义标签 + 内层 iframe」命中两次，按最外层载体去重，
+      // 否则会多占一个编号、还会在 md 里留下指向已分离节点的空洞
+      if (taken.has(holder)) continue;
+      const info = readAttachment(holder);
+      if (!info) continue;
+      taken.add(holder);
+      found.push({ holder, kind: info.kind, source: info.source, href: info.href });
+    }
+
+    // 编号按类别各算一套：视频 1/2/3、语音 1/2，不会出现「语音 5」这种串号
+    const totals = found.reduce((m, it) => {
+      m[it.kind] = (m[it.kind] || 0) + 1;
+      return m;
+    }, {});
+    const seen = {};
+    found.forEach(item => {
+      if (!root.contains(item.holder)) return;
+      const n = (seen[item.kind] = (seen[item.kind] || 0) + 1);
+      const label = item.kind
+        + (totals[item.kind] > 1 ? ' ' + n : '')
+        + (item.source ? '（' + item.source + '）' : '');
+
+      const ph = document.createElement('wxmd-link');
+      ph.setAttribute('data-href', item.href);
+      ph.setAttribute('data-label', label);
+      // Turndown 对「没有文本内容」的元素直接走 blankReplacement，不会调用自定义规则，
+      // 所以塞一段占位文本让它按有内容的节点处理（replacement 里不会用到 content）。
+      ph.textContent = item.kind;
+      item.holder.replaceWith(ph);
+    });
+
+    return found.map(it => ({ kind: it.kind, source: it.source, href: it.href }));
+  }
+
+  /** 读出一个附件节点能点开的在线地址；不是附件（普通 iframe 等）返回 null */
+  function readAttachment(holder) {
+    const tag = holder.tagName;
+
+    if (tag === 'VIDEO' || tag === 'AUDIO') {
+      const href = firstHttpUrl([
+        holder.getAttribute('src'),
+        holder.getAttribute('data-src'),
+        attrOf(holder.querySelector('source'), 'src')
+      ]);
+      if (!href) return null;
+      return { kind: tag === 'AUDIO' ? '语音' : '视频', source: '', href };
+    }
+
+    if (tag !== 'IFRAME'
+      && tag !== 'MP-COMMON-VIDEOSNIPPET'
+      && tag !== 'MP-COMMON-VIDEOCHANNELS') {
+      return null;
+    }
+
+    const frame = tag === 'IFRAME' ? holder : holder.querySelector('iframe');
+    if (!frame) {
+      // 少数页面把 <video> 直接塞进自定义标签里，退回按普通 video 处理
+      const inner = holder.querySelector('video, audio');
+      return inner ? readAttachment(inner) : null;
+    }
+
+    const playUrl = firstHttpUrl([
+      attrOf(frame, 'data-src'),
+      attrOf(frame, 'src'),
+      holder.getAttribute('data-src')
+    ]);
+    const vid = pickVideoId(holder, frame, playUrl);
+
+    // 视频号：分片加密、没有公开可分享地址，只能指回原文
+    if (tag === 'MP-COMMON-VIDEOCHANNELS' || /channels|finder/i.test(playUrl)) {
+      return { kind: '视频', source: '视频号', href: location.href };
+    }
+
+    // 腾讯视频：播放页固定是这个形状，vid 拿不到就退回原始 iframe 地址
+    if (/v\.qq\.com/i.test(playUrl)) {
+      return {
+        kind: '视频',
+        source: '腾讯视频',
+        href: vid ? 'https://v.qq.com/x/page/' + encodeURIComponent(vid) + '.html' : playUrl
+      };
+    }
+
+    if (!playUrl && !vid) return null;
+
+    // 微信自己的播放器：data-src 就是播放页（readtemplate?t=pages/video_player_tmpl…），
+    // 浏览器里打开能直接播，优先复用；只有拿到 JSON 接口地址时才按 vid 重新拼播放页。
+    const isPlayerPage = /video_player_tmpl|action=mpvideo/i.test(playUrl)
+      && !/get_mp_video_play_url|f=json/i.test(playUrl);
+    const href = isPlayerPage ? playUrl : (vid ? buildPlayerUrl(vid) : '');
+    if (!href) return null;
+    return { kind: '视频', source: '微信视频', href };
+  }
+
+  /** 微信视频播放页（就是文章里 iframe 的原始地址） */
+  function buildPlayerUrl(vid) {
+    return 'https://mp.weixin.qq.com/mp/readtemplate?t=pages/video_player_tmpl'
+      + '&action=mpvideo&auto=0&vid=' + encodeURIComponent(vid);
+  }
+
+  function pickVideoId(holder, frame, playUrl) {
+    const fromAttr = String(
+      holder.getAttribute('data-mpvid') || attrOf(frame, 'data-mpvid') || ''
+    ).trim();
+    if (fromAttr) return fromAttr;
+
+    const m = String(playUrl || '').match(/[?&]vid=([^&#]+)/);
+    if (m) {
+      try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; }
+    }
+    const m2 = String(playUrl || '').match(/wxv_[A-Za-z0-9_-]{10,}/);
+    return m2 ? m2[0] : '';
+  }
+
+  function attrOf(el, name) {
+    return el ? el.getAttribute(name) : null;
+  }
+
+  function firstHttpUrl(list) {
+    for (let i = 0; i < list.length; i++) {
+      const raw = String(list[i] || '').trim();
+      if (!raw) continue;
+      const abs = raw.startsWith('//') ? 'https:' + raw : raw;
+      if (/^https?:\/\//i.test(abs)) return abs;
+    }
+    return '';
+  }
+
+  // 代码块整理在 lib/codeblock.js（等宽 <p> / 编辑器 pre / 伪 pre 三条路径都收在那里）
+  if (WXMD_CODE && typeof WXMD_CODE.normalizeCodeBlocks === 'function') {
+    WXMD_CODE.normalizeCodeBlocks(clone, LOG);
+  } else {
+    // 缺这个模块不阻断导出，但代码块会退化成行内 code（整段粘一行、没有围栏），
+    // 必须明确报出来，否则会被当成「代码块适配又失效了」去查错方向。
+    console.error('[wx-md] lib/codeblock.js 未加载，本次导出的代码块可能失真');
+  }
   normalizeQuotes(clone);
 
   // 修复真 <pre> 里的 <br>：用 DOM 操作，避免 innerHTML 重建整棵子树
@@ -257,6 +423,17 @@
     }
   });
 
+  // 视频 / 语音：不下载本体，只写在线链接；label 里带来源，点开前就知道是什么
+  turndownService.addRule('wxmdAttachmentLink', {
+    filter: node => node.nodeName && node.nodeName.toLowerCase() === 'wxmd-link',
+    replacement: (content, node) => {
+      const href = node.getAttribute('data-href') || '';
+      const label = node.getAttribute('data-label') || '附件';
+      if (!href) return '';
+      return '\n\n[' + label + '](' + href + ')\n\n';
+    }
+  });
+
   // 移除空的装饰性 span/div
   // 注意：textContent 不统计元素，<div style><img></div> 的 textContent 也是空。
   // 直接判空会把已渲染好的 {{IMG_n}} 一起丢掉（图片下载了却无人引用），
@@ -266,7 +443,7 @@
     replacement: (content, node) => {
       if (!node.getAttribute('style')) return content;
       if (content.trim()) return content;
-      if (node.querySelector('img, br, svg, video, audio, iframe, canvas, input, picture')) {
+      if (node.querySelector('img, br, svg, video, audio, iframe, canvas, input, picture, wxmd-link')) {
         return content;
       }
       return '';
@@ -327,130 +504,8 @@
   // 引用在文件顶部（WXMD_NAMING）。
 
   // ---------- 代码块 ----------
-
-  function normalizeCodeBlocks(root) {
-    LOG('pre before:', root.querySelectorAll('pre').length);
-
-    unwrapFakePre(root);
-
-    LOG('pre after unwrap:', root.querySelectorAll('pre').length);
-
-    root.querySelectorAll('pre').forEach(pre => {
-      if (!pre.querySelector('code')) {
-        const code = document.createElement('code');
-        while (pre.firstChild) code.appendChild(pre.firstChild);
-        pre.appendChild(code);
-      }
-    });
-
-    const monoRe = /font-family[^;]*(monospace|consolas|courier|menlo|monaco|'sf mono'|'source code'|'fira code'|'jetbrains mono')/i;
-
-    // 原实现只认 p 自身的 style 属性，所以这里先按 font-family 预筛，
-    // 与后续 monoRe 判定完全等价，但候选集从「全部 p」降到「有字体的 p」。
-    const allMonoPs = Array.from(root.querySelectorAll('p[style*="font-family" i]')).filter(p => {
-      if (p.closest('pre')) return false;
-      return monoRe.test(p.getAttribute('style') || '');
-    });
-    LOG('monospace p:', allMonoPs.length);
-
-    if (allMonoPs.length === 0) return;
-
-    const grouped = new Map();
-    allMonoPs.forEach(p => {
-      const parent = p.parentElement;
-      if (!parent) return;
-      if (!grouped.has(parent)) grouped.set(parent, []);
-      grouped.get(parent).push(p);
-    });
-
-    const contentContainers = [];
-    grouped.forEach((ps, parent) => {
-      if (ps.length < 2) return;
-      const direct = Array.from(parent.children);
-      let monoPCount = 0;
-      for (const child of direct) {
-        const tag = child.tagName.toLowerCase();
-        if (tag === 'p') {
-          if (!monoRe.test(child.getAttribute('style') || '')) return;
-          monoPCount++;
-        } else if (tag === 'span' || tag === 'section' || tag === 'div') {
-          if (child.textContent.trim()) return;
-          if (child.querySelector('p, img, h1, h2, h3, h4, h5, h6')) return;
-        } else {
-          return;
-        }
-      }
-      if (monoPCount < 2) return;
-      contentContainers.push({ parent, ps });
-    });
-
-    LOG('code containers:', contentContainers.length);
-
-    contentContainers.forEach(({ parent, ps }) => {
-      if (!parent.parentNode) return;
-
-      let langHint = '';
-      let headerEl = null;
-      const wrapper = parent.parentElement;
-      if (wrapper && (wrapper.tagName === 'SECTION' || wrapper.tagName === 'DIV')) {
-        const siblings = Array.from(wrapper.children);
-        const idx = siblings.indexOf(parent);
-        if (idx > 0) {
-          const info = analyzeHeader(siblings[idx - 1], monoRe);
-          if (info.isHeader) {
-            langHint = info.lang;
-            headerEl = siblings[idx - 1];
-          }
-        }
-      }
-
-      // <br> 是 void 元素，不贡献任何文本：一个 p 内用 br 分行的代码，
-      // 直接读 textContent 会三行粘成一行且毫无分隔。必须先转成 \n 再按行拆分，
-      // 否则行尾空白清理（[ \t]+$ 只匹配整串结尾）也一并失效。
-      const lines = [];
-      ps.forEach(p => {
-        p.querySelectorAll('br').forEach(br => br.replaceWith('\n'));
-        String(p.textContent || '')
-          .replace(/\u00a0/g, ' ')
-          .split('\n')
-          .forEach(line => lines.push(line.replace(/[ \t]+$/g, '')));
-      });
-      while (lines.length && !lines[0].trim()) lines.shift();
-      while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
-      if (lines.length === 0) return;
-
-      const pre = document.createElement('pre');
-      const code = document.createElement('code');
-      if (langHint && !/^(text|txt|plain|plaintext|code)$/i.test(langHint)) {
-        code.setAttribute('class', 'language-' + langHint);
-      }
-      code.textContent = lines.join('\n');
-      pre.appendChild(code);
-
-      if (headerEl && headerEl.parentNode) headerEl.remove();
-      parent.replaceWith(pre);
-    });
-  }
-
-  function isRealCodeBlock(pre) {
-    const kids = pre.children;
-    return kids.length === 1 && kids[0].tagName === 'CODE';
-  }
-
-  /**
-   * 剥离伪 pre（微信用 pre 包裹普通段落）。
-   * 逆序遍历一遍即可：内层先处理完，外层再处理时结构已稳定，
-   * 不需要原来的「最多 20 轮全树扫描」。
-   */
-  function unwrapFakePre(root) {
-    const pres = Array.from(root.querySelectorAll('pre')).reverse();
-    for (const pre of pres) {
-      if (!pre.parentNode || isRealCodeBlock(pre)) continue;
-      const div = document.createElement('div');
-      while (pre.firstChild) div.appendChild(pre.firstChild);
-      pre.parentNode.replaceChild(div, pre);
-    }
-  }
+  // 实现已整体迁到 lib/codeblock.js（入口 WXMD_CODE.normalizeCodeBlocks）。
+  // 这里只保留调用点（见 clone 之后），避免两套逻辑各改各的。
 
   // ---------- 引用块 ----------
 
@@ -487,28 +542,4 @@
     LOG('blockquotes:', count);
   }
 
-  function analyzeHeader(el, monoRe) {
-    if (!el || (el.tagName !== 'SECTION' && el.tagName !== 'DIV')) {
-      return { isHeader: false, lang: '' };
-    }
-    if (el.querySelector('p')) return { isHeader: false, lang: '' };
-    if (el.textContent.trim().length > 40) return { isHeader: false, lang: '' };
-
-    const hasDots = el.querySelector('span[style*="border-radius"]');
-    let lang = '';
-    const spans = el.querySelectorAll('span');
-    for (const sp of spans) {
-      const style = sp.getAttribute('style') || '';
-      const t = (sp.textContent || '').trim();
-      if (!t) continue;
-      if (!monoRe.test(style)) continue;
-      if (t.length > 20) continue;
-      if (!/^[\w\-+#.]+$/.test(t)) continue;
-      if (/^\.+$/.test(t)) continue;
-      lang = t;
-      break;
-    }
-
-    return (hasDots || lang) ? { isHeader: true, lang } : { isHeader: false, lang: '' };
-  }
 })();

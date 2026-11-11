@@ -15,6 +15,7 @@ const INJECT_FILES = [
   'lib/naming.js',
   'lib/turndown.js',
   'lib/turndown-plugin-gfm.js',
+  'lib/codeblock.js',
   'content.js'
 ];
 

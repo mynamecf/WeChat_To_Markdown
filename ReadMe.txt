@@ -137,3 +137,46 @@ AB.引用配置按归档方式分开 + 两处间距对齐（v16.11.0）：
 3.读取收敛到 lib/naming.js 的 resolveImageRefForFolder(cfg, folderMode)，content.js 按本次归档方式取用，background.js 仍拿 content 传下来的 mode/prefix 拼路径，预览与真实导出不会分叉。
 4.在线模式（父卡片未选中）时，引用路径的选中项也降级成中性色：白底、灰描边、深灰标题、浅绿圆点，与「逐篇归档 / 平铺归档」未生效时的样式保持一致——绿色只留给真正生效的那一套。
 5.浮窗底部「官网 · 问题反馈」上下留白对齐：「详细配置」到这一行 6px、这一行到面板底边也 6px（原来下方 12px、上方 3px，一宽一窄）。
+AC.视频/语音只留在线链接，不再下载本体（v16.12.0）：
+1.回退视频下载：background.js、options.html、options.js、lib/defaults.js 全部回到 v16.11.0 的状态——不再有「正文视频」配置块、VID_ 文件命名模板、videoMode / videoFilename 存储键，background 里也没有下载视频、校验体积、重试降档那套逻辑。
+2.附件只下载图片：图片识别、防盗链跳过、内网地址拦截、引用路径模式、落盘与 {{IMG_n}} 替换全部不变。
+3.视频 / 语音直接在正文原位置写在线链接，不再产生任何本附件文件：
+   [视频 1（微信视频）](https://mp.weixin.qq.com/mp/readtemplate?t=pages/video_player_tmpl&action=mpvideo&auto=0&vid=wxv_xxx)
+   [视频 2（腾讯视频）](https://v.qq.com/x/page/e0012abcd34.html)
+   [视频 3（视频号）](文章原地址)
+   [语音](https://res.wx.qq.com/voice/xxx.mp3)
+4.地址来源：微信播放器 iframe / mp-common-videosnippet 复用 iframe 的 data-src 播放页（浏览器打开就能播），拿不到时按 vid 重拼播放页；腾讯视频取 vid 拼 v.qq.com/x/page/<vid>.html；视频号内容分片加密、没有公开可分享地址，指回原文；<video src/data-src>/<source> 直链原样使用（http 自动升为 https，否则 qpic 必 403）。
+5.编号按类别各算一套（视频 1/2/3、语音独立），同一段视频被「自定义标签 + 内层 iframe」命中两次时按最外层载体去重，不会跳号、也不会留下指向已分离节点的空洞。
+6.为什么退回：视频直链带 auth_key 签名会过期，mpvideo.qpic.cn 偶发 403 且与 Referer 无关，视频号拿不到文件——下载下来要么是坏文件要么很快失效，md 里留一个点不开的本地路径比留链接更糟。
+7.附件占位改在图片统计之前处理：播放器里常包着封面图，外层换成链接后那张图不在正文里了，先换掉可避免「下载了一张没人引用的封面图」。
+8.读不出地址的播放器残留节点（含普通地图/广告 iframe）仍然清掉，不会把播放器 DOM 当正文输出。
+9.实测：合成页 8 种形态（裸 iframe / 自定义标签套 iframe / 腾讯视频 / 视频号 / 直链 video / 只有 data-src / source 子节点 / 自定义标签里直接放 video）全部产出正确链接，空 data-src 与普通 iframe 被清掉；真实文章 https://mp.weixin.qq.com/s/NDNH_26mMGSFDl8C3ARirg 输出 10 条视频链接（9 个不同 vid，原文重复引用同一段视频各写一条），3 张图片占位 0/1/2 连续，md 内无 iframe/video 残留。
+AD.代码块适配：整理编辑器导出的 <pre> 结构（v16.13.0）：
+1.症状：mdnice 这类编辑器导出的代码块结构是 <pre><span 工具栏/><code><span>行1</span><span><br></span><span>行2</span>…</code></pre>。pre 有两个直接子元素（工具栏 span + code），isRealCodeBlock 判为 false，被 unwrapFakePre 当成「伪 pre」拆成 div；代码于是退化成行内 `code`——整段粘成一行、没有围栏、缩进变成 &nbsp; 字面量、换行全丢。
+2.修法：新增 normalizeEditorPres()，必须在 unwrapFakePre 之前跑。它把这类 pre 整理成标准 <pre><code>：删掉工具栏/背景图等装饰节点，只留 code 一个子节点，让后续通用围栏逻辑接管。
+3.新增 extractCodeLines()：把 code 内部按结构还原成一行一条——<br> 与块级元素（p/div/section/li/tr/h1-h6/blockquote）都算换行，\u00a0（&nbsp;）还原成普通空格，行尾空白去掉，中间空行保留（代码里的空行有意义），首尾空行去掉。
+4.安全边界：只处理「code 是 pre 的直接子节点」且「同级没有带文字的子节点」的 pre。更深嵌套（pre > p > code）或「说明文字 + code」的写法一律跳过，退给原有逻辑，避免把正文一起删掉。
+5.关键字粘连修复：这类导出会把保留字之间的空格吃掉（publicclass / publicinterface / XxxPostProcessorimplements），按「保留字 + 保留字（class/interface/enum/void）」和「字母 + implements/extends + 空格」两种组合补回空格；不碰「关键字 + 标识符」，staticMap、publicKey 这类正常变量名不受影响。
+6.txt 式代码块（等宽 <p> 成组那条路径）完全保留，只在行内也套了同一个粘连修复，两种编辑器风格都能处理。
+7.实测：https://mp.weixin.qq.com/s/uN8Npn8wwSCgwiGcieURZA 修复前 0 个围栏、代码全部退化成行内反引号；修复后 19 个代码块全部标准围栏，缩进 4 空格、空行保留、注解与保留字分行正确。回归：https://mp.weixin.qq.com/s/0IoSNvEikXsPcXTWbvQejw 3 块、https://mp.weixin.qq.com/s/f9Ji0f-GdCEVoY1M6jj7Ig 2 块，输出的正文/图片/视频链接与改动前一致。
+8.已知限制：源数据里已经丢掉的空白补不回来——例如注解紧贴保留字（@RestControllerAdvicepublic）只能按保留字组合补一部分，多出来的空白也无法还原成原始列宽。
+9.工具栏文案兼容：「复制代码 / 复制 / Copy」这类按钮文案直接丢弃；写成语言名（Java / Python / bash / c++…）时顺手当围栏语言（```java），txt / text / plain / code 按无语言处理，与等宽 <p> 路径的规则一致；出现其它文字就判定「这里混了正文」，整个 pre 不做整理，一个字都不删。
+10.合成用例（7 种）全部符合预期：工具栏只有背景图 / 写着「复制代码」/ 写着「Java」（出 ```java）/ 写着「txt」（出无语言围栏）/ 同级带正文文字（跳过且正文保留）/ code 不是 pre 直接子节点（跳过）/ 空行与 4 空格缩进保留。
+AE.代码块逻辑抽成独立模块 lib/codeblock.js（v16.14.0）：
+1.为什么拆：代码块这块原本横跨四件事——伪 pre 判定与拆分、编辑器导出结构归一、按行还原（br / &nbsp; / 块级换行）、关键字粘连修复；再加上「等宽 <p> 成组」这条老路径，一共约 270 行混在 content.js 里，和附件、引用块、模板那些逻辑缠在一起，改一处要来回滚屏找。
+2.拆分后位置（行号为 v16.14.0 状态，content.js 由 817 行降到 545 行）：
+   lib/codeblock.js  40 行  normalizeCodeBlocks —— 唯一入口，内部先 normalizeEditorPres 再 unwrapFakePre，然后走「等宽 <p> 成组」路径
+   lib/codeblock.js 160 行  isRealCodeBlock —— 判断 pre 是不是真代码块（唯一子节点是 code）
+   lib/codeblock.js 186 行  normalizeEditorPres —— mdnice 这类「工具栏 span + code」结构归一成标准 <pre><code>
+   lib/codeblock.js 234 行  extractCodeLines —— br / 块级元素换行、&nbsp; 还原、行尾 trim、中间空行保留
+   lib/codeblock.js 280 行  repairGluedKeywords —— publicclass / XxxImplements 这类粘连补空格
+   lib/codeblock.js 291 行  unwrapFakePre —— 伪 pre 拆回 div（逆序遍历，无需多轮扫描）
+   lib/codeblock.js 307 行  analyzeHeader —— 等宽 <p> 代码块上方的语言标签条
+   content.js       369 行  调用点（WXMD_CODE.normalizeCodeBlocks(clone, LOG)）
+   content.js       506 行  只留一段说明注释，指向 lib/codeblock.js
+   拆分前的位置（回溯旧代码/diff 用）：content.js 499-748 行（normalizeCodeBlocks 501、isRealCodeBlock 611、normalizeEditorPres 637、extractCodeLines 683、repairGluedKeywords 729、unwrapFakePre 740）+ 785-808 行（analyzeHeader）。
+3.注入位置：background.js 的 executeScript files 与 popup.js 的 INJECT_FILES 都在 content.js 之前加了 'lib/codeblock.js'；模块用 var 挂 WXMD_CODE，与 lib/naming.js 的 WXMD_NAMING 同一套写法，多文件注入共享同一个 isolated world 全局。
+4.依赖处理：模块不读闭包变量——日志由调用方传入（log 参数，缺省不打印），元素创建改用 root.ownerDocument，模块内部没有对 content.js 的隐式依赖，可以单独拿出测试。
+5.降级策略：这个模块缺失不阻断导出（代码块会退化成行内 code、整段粘一行），content.js 会 console.error('[wx-md] lib/codeblock.js 未加载…') 明确报出来；与命名模块不同，不直接 return 失败，避免一个排版增强项把整篇文章卡死。
+6.调试/单测：除入口外，isRealCodeBlock / normalizeEditorPres / extractCodeLines / repairGluedKeywords / unwrapFakePre / analyzeHeader 都从 WXMD_CODE 上暴露了，可以在页面 console 里对某个 pre 单独跑，不必整篇导出。
+7.回归结果（与拆分前逐项一致）：目标文章 19 个代码块、缩进 4 空格 122 行、围栏内 &nbsp; 0 处、无关键字粘连；0IoSNvEikXsPcXTWbvQejw 3 块、f9Ji0f-GdCEVoY1M6jj7Ig 2 块；视频文章 10 条附件链接、合成夹具 9 条链接；7 种工具栏/嵌套用例全部符合预期；--pack-extension 通过。
