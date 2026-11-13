@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "微信文章转Markdown",
-  "version": "1.16.14.0",
+  "version": "1.16.22.0",
   "minimum_chrome_version": "102",
   "description": "将微信公众号文章保存为 Markdown 文件，图片保存到本地文件夹",
   "permissions": [

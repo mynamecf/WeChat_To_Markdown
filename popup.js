@@ -16,6 +16,8 @@ const INJECT_FILES = [
   'lib/turndown.js',
   'lib/turndown-plugin-gfm.js',
   'lib/codeblock.js',
+  'lib/compat.js',
+  'lib/attachment.js',
   'content.js'
 ];
 
@@ -29,9 +31,34 @@ function pickArticleData(results) {
   return null;
 }
 
-function setStatus(text, kind) {
+/**
+ * 状态提示统一出口。
+ * 成功类提示 3 秒后自动消失——它只是「刚才那一下完成了」的回执，一直挂着反而
+ * 会让人以为状态没更新；失败/进行中不自动消失（还没看到就没了比留着更糟）。
+ */
+const STATUS_HOLD_MS = 3200;
+let statusTimer = 0;
+
+function setStatus(text, kind, holdMs) {
+  clearTimeout(statusTimer);
+
+  // 整体覆盖 className：顺带清掉上一轮残留的 fading
   statusEl.textContent = text || '';
   statusEl.className = kind || '';
+
+  const hold = typeof holdMs === 'number'
+    ? holdMs
+    : (kind === 'success' ? STATUS_HOLD_MS : 0);
+  if (hold <= 0) return;
+
+  statusTimer = setTimeout(() => {
+    statusEl.classList.add('fading');
+    statusTimer = setTimeout(() => {
+      if (!statusEl.classList.contains('fading')) return;
+      statusEl.textContent = '';
+      statusEl.className = '';
+    }, 260);
+  }, hold);
 }
 
 function updateArchiveModeVisibility() {

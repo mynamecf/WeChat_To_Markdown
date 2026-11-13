@@ -180,3 +180,108 @@ AE.代码块逻辑抽成独立模块 lib/codeblock.js（v16.14.0）：
 5.降级策略：这个模块缺失不阻断导出（代码块会退化成行内 code、整段粘一行），content.js 会 console.error('[wx-md] lib/codeblock.js 未加载…') 明确报出来；与命名模块不同，不直接 return 失败，避免一个排版增强项把整篇文章卡死。
 6.调试/单测：除入口外，isRealCodeBlock / normalizeEditorPres / extractCodeLines / repairGluedKeywords / unwrapFakePre / analyzeHeader 都从 WXMD_CODE 上暴露了，可以在页面 console 里对某个 pre 单独跑，不必整篇导出。
 7.回归结果（与拆分前逐项一致）：目标文章 19 个代码块、缩进 4 空格 122 行、围栏内 &nbsp; 0 处、无关键字粘连；0IoSNvEikXsPcXTWbvQejw 3 块、f9Ji0f-GdCEVoY1M6jj7Ig 2 块；视频文章 10 条附件链接、合成夹具 9 条链接；7 种工具栏/嵌套用例全部符合预期；--pack-extension 通过。
+AF.列表层级与段落换行修复（v16.15.0）：
+1.症状一：https://mp.weixin.qq.com/s/uN8Npn8wwSCgwiGcieURZA 开头目录树全平铺，子项没有缩进。
+   根因：排版器把子列表直接挂在父 <ul> 下，而不是包进上一个 <li>：
+     <ul><li>简单使用</li><ul><li>引入依赖</li>…</ul></ul>
+   Turndown 只认「<li> 内部的嵌套列表」（rules.listItem 靠 li 的深度缩进），这种结构里子列表是 ul 的兄弟节点，于是所有子项拍平成一级。
+   修法：新增 normalizeNestedLists()（content.js 573 行，调用点 378 行），在 Turndown 之前把这类子列表挂回前一个 <li> 末尾；只认「前面紧挨着 li」的情况，中间夹了有文字的其它节点就保持原样，宁可平铺也不挂错父项。
+   效果：目录变成「简单使用 / 进阶使用 / 实现原理」三项，各自带 4 空格缩进的子项。
+2.症状二：https://mp.weixin.qq.com/s/2cyPTZoHMrYNR29Lgy75ww 图片下面的图注和正文粘成一行（「图｜9to5Mac分析师郭明錤则从供应链…」），一部分图片后面的内容没有换行。
+   根因：这篇正文段落是 <section><span>文字</span></section>，里面没有 <p>；而 wechatSection 规则原来是「除 blockquote 外一律原样返回」，不给块级空行 → 相邻 section 的文本直接拼接。全篇其实都在粘连，只是图片/标题后面的位置最显眼。
+   修法：wechatSection 规则改为按内容判定（content.js 402-417 行）——只含行内内容（span/a/strong/em/br/img 等）的叶子 section 当段落处理，前后补空行；含块级子元素（p/div/section/ul/table/pre/blockquote/h1-h6/figure 等，清单见 BLOCK_KID_RE）的仍视为布局容器，交给内层元素自己处理。
+3.列表项里的 section 不加空行（node.closest('li') 直接返回 content）：否则每个目录项都会被撑开，紧凑列表会变成松散列表。
+4.blockquote 内的行为保持原样（仍然补空行），避免引用块里多行被合成一行。
+5.顺手清掉「整行只有空格」的残留（content.js 469 行）：空段落里的 <br> 会输出 "  \n"，在图片和正文之间留下一行空白。只删整行空白，不动行尾硬换行（「文字 + 两空格 + 换行」仍然保留）。
+6.实测：live3 那篇 19 张图、13 条图注全部独立成段，正文 40 个 section 与浏览器里的视觉间距（26px / 图注后 16px）一一对应，无粘连；live 那篇 19 个代码块、4 处缩进层级正常；live1 3 块 / live2 2 块、视频文章 10 条附件链接、合成夹具 9 条链接均不变；四篇的纯空白行由 4~9 行降到 0；--pack-extension 通过。
+AG.伪标题兼容：新增 lib/compat.js 特殊兼容层（v16.16.0）：
+1.症状：https://mp.weixin.qq.com/s/jV0gm4Qmv8M2JxXQ0NsEpA 里的「一、背景」「三、Why Zvec?」「3.1 开箱即用：…」这些小节标题导出后全是普通段落，只有「3.1 …」因为原文用了 <strong> 变成一行加粗文字，层级完全丢失。
+2.根因：这些标题没有用 <h1>~<h6>，而是靠样式伪装：
+   一级：<section style="display:inline-block;font-size:17px;color:rgb(255,129,36);border-bottom:5px solid rgb(255,129,36)"><p><span>一、背景</span></p></section>
+   二级：<section style="display:flex">…图标…<section><p><span><strong>3.1 开箱即用：…</strong></span></p></section></section>
+   转换器只认 h* 标签，普通 section 一律当正文，视觉上的层级就没了。
+3.新增 lib/compat.js（149 行，入口 WXMD_COMPAT.normalizeCompat，content.js 381 行调用）：这是「微信特殊排版兼容层」，只收通用规则认不出来的特殊结构；代码块在 lib/codeblock.js，正文段落/列表/引用在 content.js，以后同类特殊形态都往这里加，不再散回 content.js。
+4.识别规则（lib/compat.js 58 行 normalizePseudoHeadings）：
+   - 中文序号「一、背景」→ h2（改成 ##），数字多级编号「3.1 xxx / 3.1.2 xxx」→ h3（###）；
+   - 文本长度 ≤ 40 且不含句末标点（。！？；），避免把「一、二线城市是…。」这类正文句子当标题；
+   - 不在 li / pre / blockquote / table / 已有 h* 里；
+   - 结构必须干净（isSimpleBlock，110 行）：不含 img/svg/video/br/ul/ol/table/pre/blockquote/hr，容器层数 ≤ 2；
+   - 数字编号额外要求加粗（isBold，118 行，<strong>/<b> 或 style 里 font-weight:bold/600-900）；
+   - 「标题 + 配图」的组合容器不处理（hasMediaInHolder，133 行）：容器里除了这段文字还有图片/图标时保持原样，免得把图注抬成小节、图片位置乱掉；
+   - 同一处标题常被多层 section 包着，只替换最内层（否则会输出两个标题）。
+5.注入位置：background.js 的 executeScript files 与 popup.js 的 INJECT_FILES 都在 content.js 之前加了 'lib/compat.js'；用 var 挂 WXMD_COMPAT，与 WXMD_NAMING / WXMD_CODE 同一套写法。
+6.降级：模块缺失不阻断导出，content.js 打印 console.error('[wx-md] lib/compat.js 未加载…')，只是伪标题会退回普通段落。
+7.实测（目标文章）：输出 5 个 ## + 5 个 ###，层级与原文一致 ——
+   ## 一、背景 / ## 二、What is Zvec? / ## 三、Why Zvec? / ### 3.1~3.5 / ## 四、后续规划 / ## 五、加入我们；11 张图片占位不变，代码块 2 个不变。
+8.回归：live 16 个标题 / live1 8 / live2 8 / live3 2，与改动前完全一致（都是原有 h*，没有新增误判）；视频文章 10 条附件、合成夹具 9 条、代码块夹具 5 个围栏（含 ```java）均不变。
+9.夹具边界（10 个场景）：中文一级 ✓、数字二级 ✓、三级 3.1.2 ✓；正文句「一、二线城市…。」不转、加粗非编号不转、列表项不转、引用块不转、带图片容器不转、真 h2 不重复包装。
+10.已知限制：「3.14 圆周率」这种「一位整数 + 两位小数 + 空格 + 短词」且被加粗的独立段落，会被当成三级标题（正则无法区分 3.1 与 3.14）。真实文章里这类文字通常不加粗，触发概率很低；要收紧就把 lib/compat.js 的 NUM_HEADING_RE 改成只认 {1,2} 位段。
+AH.播放器 UI 过滤、浮动序号合并，代码按职责分模块（v16.17.0）：
+1.问题一（https://mp.weixin.qq.com/s/NDNH_26mMGSFDl8C3ARirg）：导出后有大量重复内容，正文里混进「已关注关注重播 分享 赞 / 关闭观看更多 / 退出全屏 / 切换横屏 / 进度条百分之0 / 倍速播放中 0.5倍 0.75倍 / 视频详情 / 继续观看 + 文章标题 + 观看更多转载…」。
+   根因：微信把整台播放器渲染在容器里，结构是 span#js_mp_video_container_N.video_iframe > #page-content > #js_mpvedio_wrapper_* > (.appmsg_video 点赞面板 + .feed-wrapper 倍速条/观看更多) + #bottom_bar 视频详情，真正的 <video> 埋在最里层。旧逻辑只把那个 <video> 换成链接，整台播放器的 UI 文案全部留在正文里，于是每个视频后面都跟一段同样的「已关注…」，还把文章标题、作者重复一遍。
+   修法：新增 lib/attachment.js，按「最外层播放器容器」整块替换。findCarrier()（122 行）从内向外扫，取最外层匹配 .video_iframe / [id^=js_mp_video_container] / mp-common-videosnippet / mp-common-videochannels / .appmsg_video / [id^=js_mpvedio_wrapper] 的祖先；只替换最近一层是不够的（.appmsg_video 只包点赞面板，倍速条在 .feed-wrapper）。读不出地址的容器（PLAYER_CHROME_SEL，31 行）在 content.js 242 行整块删除，不留「已关注…」残渣。
+2.问题二（https://mp.weixin.qq.com/s/CwRObRhAR-j9t5-DYaAEMA）：导出后「1.」单独一行、正文另起一行，「1.多角色智能配音：」被拆成两段。
+   根因：这类「有序列表」不是 <ul>/<ol>，而是浮动序号：<section display:block;clear:both><section float:left;width:24px>1.</section><section margin-left:24px>正文</section></section>。序号和内容是并列的两个块级 section，转换后各自成段。
+   修法：lib/compat.js 新增 normalizeFloatingMarkers()（69 行）——识别「纯序号（1. / 1、/ (1) / a) / - / • / ① / 一、）+ style 里写了 float」的叶子节点，把序号并进后面内容块的开头，再删掉序号节点。用 inlineTarget()（126 行）沿「唯一子元素」钻到真正承载文字的那一层，否则文本插在外层容器上仍会单独成段。
+3.安全边界：序号长度 ≤ 4 字符且必须匹配序号正则；里面混了 img/svg/br/ul/table/pre/video 就不动；真 <li>、引用块、代码块、表格里的序号不处理；后面跟的是图片/列表/表格就不合并（宁可保留原样）；非 float 的「4.」独立段落保持原样。
+4.输出形态：中文序号「3、」不加空格，直接粘正文；西文「1.」「•」补一个空格。Turndown 会把行首「1. 」转义成「1\. 」，这是它的列表保护，渲染出来仍是「1. 多角色智能配音：…」一行，不额外做反转义——否则正文里本来以「1. 」开头的普通段落会被误变成列表。
+5.代码整理（这次的主要工作量，目标是不再出现互相打架的兼容逻辑）：
+   lib/attachment.js 233 行  视频/语音：collect 53、findCarrier 122、readAttachment 133、PLAYER_CHROME_SEL 31
+   lib/codeblock.js  344 行  代码块：等宽 <p> / 编辑器 pre / 伪 pre
+   lib/compat.js     254 行  特殊排版：normalizeCompat 43（入口）、normalizeFloatingMarkers 69、inlineTarget 126、normalizePseudoHeadings 162
+   content.js        486 行（原 602 行）  图片（唯一下载的附件）、引用块 397、嵌套列表 445、段落/图片/附件三条 Turndown 规则、YAML 收尾
+6.规则优先级写死在 content.js 244-262 行，四条互不重叠：① 代码块 → ② 引用块 → ③ 特殊排版（compat）→ ④ 嵌套列表。引用块排在伪标题前面是有意的：微信用左边框画的引用块是作者的明确意图，「带左边框的标题」只是我们的猜测，宁可当引用也别把引用拆成标题。compat 内部一律跳过 blockquote / li / pre / table，不再回头改引用块里的东西。
+7.内部函数重排：normalizeQuotes / normalizeNestedLists 从「return 之后」挪到 return 之前（content.js 397 / 445 行），不再依赖函数声明提升；原来那几个「实现已迁走」的占位注释也删了，模块分工写在文件头 1-6 行。
+8.降级：lib/attachment.js 缺失时 content.js 打 console.error 并在下一步把播放器外壳整块删掉（少链接但不留垃圾文案）；lib/compat.js 缺失时伪标题与序号合并不生效；lib/codeblock.js 缺失时代码块退化成行内 code。三者都不阻断导出。
+9.实测：
+   NDNH（视频文章）md 从 6565 字符降到 3955，10 条视频链接不变，「已关注/重播/观看更多/退出全屏/倍速/进度条/视频详情/继续观看」全部为 0 次，无重复长段落。
+   CwRObRh（编号文章）输出「1\. **多角色智能配音**：导入书籍后开启…」一行，18 张图、1 条视频链接不变。
+   回归：SpringBoot 19 块代码 / IP 归属地 3 块 / PDF 2 块 / 苹果 19 图 / Zvec 2 块 + 10 标题，字符数与改动前逐字一致。
+   夹具：视频 8 种形态 9 条链接不变；代码块 5 个围栏（含 ```java）；新增 8 个场景（浮动数字序号 / 中文序号 / 项目符号 / 非浮动序号不动 / 序号后跟图片不合并 / 真 ol 不受影响 / 播放器外壳只留链接 / 空播放器整块清掉）全部符合预期。
+   node --check 五个文件 + --pack-extension 打包通过（产物已删）。
+10.已知限制：浮动序号只认「纯序号」，像「步骤1」「版本3.」这类混在句子里的编号不处理；「1.」并回正文后 Turndown 会加转义反斜杠，纯文本编辑器里能看到「1\.」，渲染后是「1.」。
+AI.列表里手写序号去重（v16.18.0）：
+1.症状：https://mp.weixin.qq.com/s/Q887XL0LHqpdObwIVp3nnQ 开头「1. 工具载体：VS Code…」这组导出后每行都是「1.  1\. 工具载体…」——序号显示了两遍；更严重的是后面「2. 创建 Github Repository」「3. 下载 Github Desktop」…「14. 定时同步」共 13 步，导出后全变成「1.」，序号彻底乱掉。
+2.根因：这一篇的「有序列表」编号是作者手打进正文的，DOM 是 <ol><li><section><span>1. 工具载体：VS Code…</span></section></li></ol>——<ol> 自己不带编号样式（微信 CSS 把 list-style 干掉了），编号只是文字。Turndown 的 rules.listItem 会给每个 <li> 自动补一个「1.  」前缀，于是「自动序号 + 手写序号」叠在一起。又因为每一步后面都跟着截图，排版器把每一小步都收成一个独立的 <ol>，自动编号每段都从 1 开始数，13 个单步列表于是全成了「1.」。
+3.修法：lib/compat.js 新增 normalizeManualListNumbers()（85 行）：li 开头的手写序号认定为作者意图——从正文里摘掉，改成所在 <ol> 的 start 属性，交给 Turndown 按 start + 位置编号（rules.listItem 读 parent 的 start）：「2. 创建 Github Repository」所在的单步 ol 设 start=2，输出就是「2. 」，不再是「1.」。
+   - 序号正则 MANUAL_NUM_RE（42 行）覆盖 1. / 1、/ 1) / 1）、/（1）/(1)；末尾的 (?!\d) 专门拦「1.5 版本修复了闪退」，不会把「一点五」当「第 1 条」摘掉。
+   - <ul> 里如果「每一项」都手写了序号（秀米常见的 <ul><li>1、xxx</li>…</ul>），说明本来就是有序列表，直接换成 <ol> 并带上 start；只写了一部分的（可能是正文恰好以数字开头的条目）不动，保持「-   1、第一条」原样。
+   - 只处理列表的直接子项，嵌套列表各归各的父级；readManualNumber（138 行）只读「这一项的第一段文字」（firstTextNode 166 行跳过子列表/代码/引用/媒体），不会把子列表的文字当父项的序号。
+   - 整项只剩一个序号、没有正文的（<li>1.</li>）不摘：摘完会变成一个空列表项，保留原样至少还看得出编号。
+   - 摘完序号后变空的行内壳子（<span>1.</span>）一并删掉（pruneEmptyShell 205 行），不留空段落。
+4.同一篇顺带修的两处（都是导出后直接看得见的错）：
+   - 「用标题撑间距」的空标题 <h1><br></h1> 会留一行孤零零的「#」，现在在清理阶段整块删掉（content.js 242 行，只删既没有文字也没有媒体的 h*）。
+   - 「以下是保姆级教程：」在原文里是真 <h3>，只因为带了一条 border-left 装饰，被 normalizeQuotes 当成引用块转成了「> 以下是保姆级教程：」。content.js 420 行加了跳过：真 <h1>~<h6> 是结构、左边框只是装饰，不能再反过来把标题拆成引用（伪标题才是靠猜测，两者不冲突）。
+5.实测（目标文章）：双序号 19 处 → 0；编号 1~7、9~14 连续（「安装 Markdown Image 插件」那一步原文自己写的就是「1.」，应为 8，按原文保留）；3 个 h3 由引用块恢复成「### 以下是保姆级教程：/ ### 到这里…/ ### 写在最后」；29 张图、3 个代码块不变；md 4797 → 4715 字符（去掉的是重复序号、空「#」和「>」标记）。
+6.回归：live / live3 / live4 / live5 / live6 五篇逐字一致；live1 的嵌套目录「1、引入依赖 / 2、下载离线库 / 3、简单使用」由「-   1、…」变成「1.  …」（本来就是有序的，属预期变化）；live2 两个真 <h3>「获取 MinerU API Token」「安装 skill 包」由引用块恢复成「###」（预期变化，同一类问题）。
+7.夹具（build_list.js，15 个场景）：单 ol 多项 ✓、每步一个 ol 的 4/5/6 续号 ✓、ul 全项带号 → ol ✓、ul 从中间开始编号（5、6、7 → start=5）✓、ul 部分带号保持原样 ✓、1.5/2.0 版本号不误摘 ✓、（1）(1) 括号序号 ✓、只剩序号的项不动 ✓、父项 2 + 子项 1/2 各自编号 ✓、序号单独成 span ✓、真 ol 不加 start ✓、带边框 h3 保持标题 ✓、空 h1 不输出「#」✓、中文序号不处理 ✓、li 里带图片不误判 ✓。
+8.已知限制：手写序号「作者写多少就是多少」，不做顺延纠正——这篇第 8 步写成 1，导出也就是 1。要做「按位置重排」得再加一层跨列表的连续编号推断，误伤风险高（两组独立的 1、2、3 列表会被错误接续），暂不做。
+9.node --check 六个文件 + --pack-extension 打包通过（产物已删）。
+AJ.状态提示自动消失 + 快捷键悬浮说明（v16.19.0）：
+1.问题一：「导出成功！」「已取消固定」这类回执一直挂在界面上，不消失也没有动效，看起来像卡住了。
+   修法：popup.js（42 行）和 floating.js（492 行）把状态写入统一收敛到一个 setStatus(text, kind, holdMs) 出口。成功类（kind='success'）默认 3.2 秒后淡出：先加 .fading（CSS opacity 0.25s 过渡），260ms 后清空文本并把 class 复位；进行中（正在提取/正在下载）和失败/超时不自动消失——这类信息还没看完就抹掉比留着更麻烦，失败后往往还要回头查下载目录。
+   时长取值：3.2 秒够读完「导出成功！」再回神，再长就会和下一次操作的状态打架。要调只改 STATUS_HOLD_MS 一个常量（popup.js 39 行 / floating.js 489 行）。
+   坑：新的 setStatus 必须 clearTimeout 上一轮定时器，并用「整体覆盖 className」的方式清掉残留的 fading；否则上一次的淡出定时器会在这一次提示刚出来时把它抹成空白。
+2.问题二：浮窗里的「⌘ S / Ctrl S」只在浮窗展开时生效（keydown 里判了 host 可见 + panel.open），但界面上没有说明；收起成圆球后按快捷键只会触发浏览器自己的「保存网页」，容易被当成扩展失灵。
+   修法：快捷键徽标 kbd#wxMdKbd 挂 data-tip，CSS ::after 用 attr(data-tip) 画深色气泡（floating.js 246-290 行），悬停徽标显示、移开淡出；文案按平台生成（546-551 行）：「⌘ S 只在浮窗展开时生效；收起成圆球或关闭浮窗后，按下会触发浏览器自带的「保存网页」。」其中保存入口的名字也分平台（Windows「保存网页」/ macOS「存储为…」）。同时写 aria-label，键盘 focus（:focus-visible）也能看到。
+   为什么挂在徽标上而不是整个面板：导出按钮是高频点击区，跟着按钮 hover 弹提示会挡住选项；徽标本身就是「这条提示在讲快捷键」的锚点。气泡右对齐徽标、向左展开，不会溢出 320px 面板。
+3.验证：浮窗夹具（测试时把 attachShadow 临时改 open 才能外部断言 + 强制显示 tooltip 截图）点导出 → t0「正在提取文章...」、t1.2s「导出成功！」cls=wx-md-status success、t3.8s 文本已清空且 class 复位；截图确认气泡在面板内、箭头指向徽标、无裁切；node --check floating.js / popup.js 通过；--pack-extension 通过（产物已删）。
+（AK 起气泡挂载点改为整颗导出按钮，本条「挂徽标」的取舍已废弃，见 AK。）
+AK.快捷键说明改挂整颗导出按钮（v16.20.0）：
+1.改动：气泡原先只在右侧那枚 kbd 徽标上弹出，鼠标得精确移到 30px 宽的小胶囊上才看得到，实际很难发现。现在整颗「导出当前文章」按钮都是说明入口——鼠标落在按钮任意位置（图标、文字、徽标）都会浮出同一段气泡。
+2.实现：CSS 伪元素从 .wx-md-kbd::before/::after 整体挪到 .wx-md-export::before/::after（floating.js 242-300 行），按钮补 position: relative（221 行）作为定位基准；气泡 left: 50% + margin-left: -104px 居中于按钮，箭头同样居中指向按钮，不再右对齐徽标。文案改由 exportBtn.dataset.tip 写入（floating.js 561 行），kbd 只留文字（549 行），原先写在 kbd 上的 aria-label 一并去掉——它嵌在按钮里，会把按钮的无障碍名读成「导出当前文章 Ctrl S 只在浮窗展开时生效…」，反而更吵。
+3.细节：导出进行中（.wx-md-export:disabled）不弹气泡（293-299 行，靠放在 hover 规则之后覆盖），避免等待期间这段与进度无关的说明压在选项区上；气泡 pointer-events: none，盖住「归档方式」时也不影响点击；面板 overflow: hidden，气泡居中后仍完整落在 320px 面板内（宽度处理见 AL）。
+4.验证：浮窗夹具改为「把 :hover 伪元素规则替换成常显」来模拟悬停（原注入 style 的方式进不了 closed shadow），探针读到 btn.tip 有文案、kbd.tip 为空、::after 的 content 解析成该文案、按钮 position=relative；截图确认气泡在面板内水平居中、箭头指向按钮、无裁切；状态提示时序（t0 → 1.2s 成功 → 3.8s 清空）不受影响；node --check 全通过，--pack-extension 通过（产物已删）。
+AL.说明文案简化 + 平台快捷键判断加固（v16.21.0）：
+1.问题一：AK 那句「Ctrl S 只在浮窗展开时生效；收起成圆球或关闭浮窗后，按下会触发浏览器自带的「保存网页」。」信息量对，但三行黑底压在「归档方式」上挡视野，读起来也啰嗦——用户只想知道「什么时候能用」。
+   改法：文案收成一句「⌘ S 仅在浮窗展开时生效」（floating.js 564 行），去掉对「收起后会落到浏览器保存对话框」的解释；气泡宽度不再固定 208px，改成 white-space: nowrap + left:50% + transform: translateX(-50%)（259-261 行），宽度跟着文字走，padding 收到 5px 9px、圆角 6px、投影减轻。现在是一行小胶囊，只压在按钮正上方一小条。
+   连带删掉不再需要的按平台取「保存网页 / 存储为…」的分支。
+2.问题二（用户提问）：Mac 上会不会显示成对应的快捷键？——会，徽标和气泡共用同一个 isMac 判断（556 行）：Mac 显示「⌘ S 仅在浮窗展开时生效」，其它平台显示「Ctrl S …」。
+   顺手加固平台判断：原来只看 navigator.platform || userAgent，新版 Chrome 的 navigator.platform 已不推荐依赖，改为优先 navigator.userAgentData.platform（UA-CH），再退回 navigator.platform，最后兜底 userAgent；正则同时认 mac/iphone/ipad/ipod 与「Mac OS X」，其余一律按 Ctrl S 显示。
+3.验证：Windows 夹具读到 btn.tip「Ctrl S 仅在浮窗展开时生效」；mac 模式夹具（探针前 Object.defineProperty 伪装 navigator.userAgentData.platform='macOS'）读到「⌘ S 仅在浮窗展开时生效」，::after 的 content 同步；截图确认气泡缩成单行、宽度约为按钮一半、水平居中、箭头指向按钮、无裁切；状态提示时序不变；node --check 全通过，--pack-extension 通过（产物已删）。
+AM.快捷键说明改用原生 tooltip（v16.22.0）：
+1.问题：AK/AL 自绘的黑底气泡与面板里其它提示不是一套东西——球体「按住可拖动 · 点击展开/收起」、固定/最小化、「每篇文章单独一个文件夹…」「所有文章与附件置于同一文件夹…」用的都是原生 title，灰白小纸条、悬停约 0.5~1 秒后才出；自绘气泡则是立刻淡入、深色、带箭头，混在一起像是另一套设计语言。
+   改法：删掉整段 .wx-md-export::before/::after 样式（原 241-300 行，连带 ::hover / :disabled 覆盖共 50 行）和按钮上的 position: relative，改为 exportBtn.title（floating.js 508 行）。样式和出现延迟从此完全交给浏览器，与其它提示逐字一致，不再需要维护三角、投影、圆角、宽度这些参数。
+2.保留的：文案仍按平台生成（503-508 行）Windows「Ctrl S 仅在浮窗展开时生效」/ macOS「⌘ S 仅在浮窗展开时生效」；徽标 kbd 仍显示对应按键。
+3.已知代价：原生 title 只在悬停时出现，键盘 focus 不会弹（自绘版有 :focus-visible 支持）；另外挂的是整颗按钮，鼠标停在按钮任意位置都会出，和归档方式按钮的行为一致。
+4.验证：浮窗夹具读到 btn.title 有值、::after 的 computed content 为 "none"（确认自绘气泡已彻底移除）；mac 模式夹具读到「⌘ S 仅在浮窗展开时生效」；状态提示时序不变；node --check 全通过，--pack-extension 通过（产物已删）。原生 tooltip 由浏览器 UI 绘制，截图抓不到，只能靠属性断言。

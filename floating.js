@@ -238,6 +238,10 @@
       letter-spacing: 0.5px;
     }
 
+    /* 快捷键说明不再自绘：直接挂在 .wx-md-export 的 title 上，
+       与面板里其它提示（球体、固定/最小化、归档方式）同一套原生 tooltip，
+       样式与出现延迟都由浏览器统一给。文案在 JS 里按平台生成。 */
+
     .wx-md-link {
       width: 100%; padding: 7px;
       background: #fff; border: 1px solid #e5e7eb; border-radius: 8px;
@@ -268,10 +272,12 @@
       font-size: 11px;
       text-align: center;
       color: #6b7280;
+      transition: opacity 0.25s ease;
     }
     .wx-md-status:not(:empty) {
       margin-top: 8px;
     }
+    .wx-md-status.fading { opacity: 0; }
     .wx-md-status.error { color: #ef4444; }
     .wx-md-status.success { color: var(--brand-green); }
   `;
@@ -428,6 +434,34 @@
   const optCards = Array.from($$('.wx-md-opt'));
   const archiveBtns = Array.from($$('.wx-md-archive-btn'));
 
+  // ---------- 状态提示 ----------
+
+  // 成功回执留 3 秒就够：它只说明「刚才那一下完成了」，一直挂着会让人以为是新状态。
+  // 进行中（正在提取/下载）和失败都不自动消失——没看到就没了，比留着更麻烦。
+  const STATUS_HOLD_MS = 3200;
+  let statusTimer = 0;
+
+  function setStatus(text, kind, holdMs) {
+    clearTimeout(statusTimer);
+    statusEl.textContent = text || '';
+    // 整体覆盖 className，顺带清掉上一轮残留的 fading
+    statusEl.className = 'wx-md-status' + (kind ? ' ' + kind : '');
+
+    const hold = typeof holdMs === 'number'
+      ? holdMs
+      : (kind === 'success' ? STATUS_HOLD_MS : 0);
+    if (hold <= 0) return;
+
+    statusTimer = setTimeout(() => {
+      statusEl.classList.add('fading');
+      statusTimer = setTimeout(() => {
+        if (!statusEl.classList.contains('fading')) return;
+        statusEl.textContent = '';
+        statusEl.className = 'wx-md-status';
+      }, 260);
+    }, hold);
+  }
+
   // ---------- 官网 / 问题反馈 ----------
   // 地址只写在 lib/defaults.js 的 WXMD_LINKS 一处，与弹窗、配置页共用；
   // 这里挂的是普通 <a target="_blank">—— 内容脚本拿不到 chrome.tabs，锚点跳新标签最稳。
@@ -457,8 +491,22 @@
     box.hidden = !(hasHome || hasFeedback);
   })();
 
-  const isMac = /Mac|iPod|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+  // 平台判断：先看 UA-CH 的 platform（新版 Chrome 更可靠），再退回 navigator.platform，
+  // 最后兜底 userAgent——只认 mac 的三种写法，其余一律按 Windows/Linux 显示 Ctrl S。
+  const platformStr = (navigator.userAgentData && navigator.userAgentData.platform)
+    || navigator.platform
+    || navigator.userAgent
+    || '';
+  const isMac = /mac|iphone|ipad|ipod/i.test(platformStr) || /Mac OS X/.test(navigator.userAgent || '');
   if (kbdEl) kbdEl.textContent = isMac ? '⌘ S' : 'Ctrl S';
+
+  if (exportBtn) {
+    const keys = isMac ? '⌘ S' : 'Ctrl S';
+    // 用原生 title，和面板里其它提示（球体 / 固定 / 最小化 / 归档方式）保持一致：
+    // 同样的灰白小纸条、同样的悬停延迟，不再自己画黑底气泡。
+    // 一句话就够：keydown 里判了「浮窗必须展开」，收起成圆球后按下去不会导出。
+    exportBtn.title = keys + ' 仅在浮窗展开时生效';
+  }
 
   let currentMode = DEFAULT_SETTINGS.imageMode;
   let currentFolder = DEFAULT_SETTINGS.folderMode;
@@ -742,8 +790,7 @@
 
   exportBtn.addEventListener('click', async () => {
     exportBtn.disabled = true;
-    statusEl.textContent = '正在提取文章...';
-    statusEl.className = 'wx-md-status';
+    setStatus('正在提取文章...');
 
     // 后台被浏览器强杀、或卡在某个 Promise 上不返回时，sendMessage 可能一直悬空，
     // 按钮会永久 disabled。浮窗拿不到图片数量，用一个固定的宽松上限兜底。
@@ -765,17 +812,15 @@
         guard
       ]);
       if (resp && resp.success) {
-        statusEl.textContent = '导出成功！';
-        statusEl.className = 'wx-md-status success';
+        setStatus('导出成功！', 'success');
       } else {
-        statusEl.textContent = '失败：' + ((resp && resp.error) || '未知错误');
-        statusEl.className = 'wx-md-status error';
+        setStatus('失败：' + ((resp && resp.error) || '未知错误'), 'error');
       }
     } catch (err) {
-      statusEl.textContent = err.wxmdTimeout
-        ? '超时：' + err.message
-        : '失败：' + (err.message || '请刷新页面后重试');
-      statusEl.className = 'wx-md-status error';
+      setStatus(
+        err.wxmdTimeout ? '超时：' + err.message : '失败：' + (err.message || '请刷新页面后重试'),
+        'error'
+      );
     } finally {
       clearTimeout(guardTimer);
       exportBtn.disabled = false;

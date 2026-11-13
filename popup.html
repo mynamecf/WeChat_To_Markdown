@@ -160,8 +160,9 @@
     .footer-link svg { flex: 0 0 auto; }
     .footer-sep { width: 1px; height: 10px; background: #e5e7eb; flex: 0 0 auto; }
 
-    #status { font-size: 11px; text-align: center; color: #6b7280; }
+    #status { font-size: 11px; text-align: center; color: #6b7280; transition: opacity 0.25s ease; }
     #status:not(:empty) { margin-top: 8px; }
+    #status.fading { opacity: 0; }
     .error { color: #ef4444; }
     .success { color: var(--brand-green); }
   </style>

@@ -123,6 +123,8 @@ async function handleExportFromFloating(sender, options) {
         'lib/turndown.js',
         'lib/turndown-plugin-gfm.js',
         'lib/codeblock.js',
+        'lib/compat.js',
+        'lib/attachment.js',
         'content.js'
       ]
     });
