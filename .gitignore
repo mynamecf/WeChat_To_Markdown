@@ -1,0 +1,6 @@
+# 开发期依赖（npm install 生成，不参与打包）
+node_modules/
+
+# 打包产物（npm run pack；.pem 是签名私钥，丢失后无法用同一扩展 ID 发版）
+*.crx
+*.pem

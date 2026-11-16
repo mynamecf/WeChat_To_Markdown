@@ -10,26 +10,45 @@ const archiveModeBox = document.getElementById('archiveModeBox');
 const archiveModeBtns = Array.from(document.querySelectorAll('.archive-mode-btn'));
 const pinBtn = document.getElementById('pinBtn');
 
-const INJECT_FILES = [
-  'lib/defaults.js',
-  'lib/naming.js',
-  'lib/turndown.js',
-  'lib/turndown-plugin-gfm.js',
-  'lib/codeblock.js',
-  'lib/compat.js',
-  'lib/attachment.js',
-  'content.js'
-];
+// 注入清单与结果解析都在 lib/injectlist.js（与 background.js 共用一份）
+const INJECT_FILES = (typeof WXMD_INJECT_FILES !== 'undefined') ? WXMD_INJECT_FILES : ['content.js'];
+const pickArticleData = (typeof WXMD_pickArticleData === 'function')
+  ? WXMD_pickArticleData
+  : (results) => {
+      if (!Array.isArray(results)) return null;
+      for (let i = results.length - 1; i >= 0; i--) {
+        const r = results[i] && results[i].result;
+        if (r && typeof r === 'object' && typeof r.success === 'boolean') return r;
+      }
+      return null;
+    };
 
-/** 从 executeScript 结果里取出 content.js 的返回值，不依赖固定下标 */
-function pickArticleData(results) {
-  if (!Array.isArray(results)) return null;
-  for (let i = results.length - 1; i >= 0; i--) {
-    const r = results[i] && results[i].result;
-    if (r && typeof r === 'object' && typeof r.success === 'boolean') return r;
+/**
+ * 探活：当前标签页是不是「文章正文页」。
+ *
+ * 只看域名不够：mp.weixin.qq.com 下还有首页、视频播放页（/mp/readtemplate?t=…）、
+ * 历史消息页，这些页面里 floating.js 会自己 return，浮窗根本不会挂。
+ * 不先探活就写 pinned=true 并提示成功，用户看到的是「成功但页面没反应」，
+ * 而 pinned 已落库，下次打开任意文章页浮窗会自己冒出来——更像 bug。
+ */
+async function probeArticlePage(tabId) {
+  try {
+    const res = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => !!document.querySelector('#js_content, .rich_media_content, #js_image_content, #activity-name')
+    });
+    return !!(res && res[0] && res[0].result);
+  } catch (e) {
+    return false;
   }
-  return null;
 }
+
+// 导出期间的看门狗续期函数，由 PROGRESS 消息触发；非导出期间为 null
+let guardArm = null;
+chrome.runtime.onMessage.addListener(msg => {
+  if (!msg || msg.type !== 'EXPORT_PROGRESS') return;
+  if (guardArm) guardArm();
+});
 
 /**
  * 状态提示统一出口。
@@ -177,21 +196,49 @@ pinBtn.addEventListener('click', async () => {
 
   const { pinned } = await chrome.storage.local.get({ pinned: false });
   const newPinned = !pinned;
+
+  if (newPinned) {
+    // 先确认是文章页，避免「提示成功但浮窗不存在」
+    if (!(await probeArticlePage(tab.id))) {
+      setStatus('当前页面不是文章正文页，浮窗只在文章页显示', 'error');
+      return;
+    }
+  }
+
   await chrome.storage.local.set({ pinned: newPinned });
 
   if (newPinned) {
+    const revert = async (text) => {
+      await chrome.storage.local.set({ pinned: false }).catch(() => {});
+      setPinnedUI(false);
+      setStatus(text, 'error');
+    };
+
     try {
-      await chrome.tabs.sendMessage(tab.id, { type: 'SHOW_FLOATING' });
+      const resp = await chrome.tabs.sendMessage(tab.id, { type: 'SHOW_FLOATING' });
+      if (resp && resp.ok === false) {
+        await revert(resp.error || '浮窗未能显示');
+        return;
+      }
     } catch (e) {
       // 页面未注入浮窗脚本时手动注入一次
       try {
         await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['floating.js'] });
-        setTimeout(() => {
-          chrome.tabs.sendMessage(tab.id, { type: 'SHOW_FLOATING' }).catch(() => {});
-        }, 150);
       } catch (err) {
         console.error('[wx-md] 注入浮窗失败', err);
-        setStatus('固定失败：' + err.message, 'error');
+        await revert('固定失败：' + err.message);
+        return;
+      }
+      // 注入是异步 IIFE，监听器要等到下一拍才注册好
+      await new Promise(resolve => setTimeout(resolve, 150));
+      try {
+        const resp2 = await chrome.tabs.sendMessage(tab.id, { type: 'SHOW_FLOATING' });
+        if (resp2 && resp2.ok === false) {
+          await revert(resp2.error || '浮窗未能显示');
+          return;
+        }
+      } catch (err2) {
+        await revert('固定失败：' + err2.message);
         return;
       }
     }
@@ -216,6 +263,18 @@ document.getElementById('openOptions').addEventListener('click', async () => {
 
 document.getElementById('closeBtn').addEventListener('click', () => window.close());
 
+/** 成功文案带上「有几张图没下来」——否则用户只会在下次打开笔记时看到裂图 */
+function successText(stats) {
+  const s = stats || {};
+  const notes = [];
+  if (s.failed) notes.push(`${s.failed} 张图片下载失败`);
+  if (s.blocked) notes.push(`${s.blocked} 张图片未下载（非微信图床或内网地址）`);
+  if (s.unresolved) notes.push(`${s.unresolved} 处图片链接未能替换`);
+  return notes.length
+    ? `导出成功，但${notes.join('，')}；这些位置保留为在线链接`
+    : '导出成功！';
+}
+
 exportBtn.addEventListener('click', async () => {
   exportBtn.disabled = true;
   setStatus('正在提取文章...', '');
@@ -228,25 +287,47 @@ exportBtn.addEventListener('click', async () => {
     if (settled) return;
     settled = true;
     clearTimeout(guard);
+    guardArm = null;
     exportBtn.disabled = false;
     setStatus(text, kind);
   };
 
+  // 看门狗只表示「后台多久没动静」，不是「总共最多等多久」。
+  // 原来按 60s + 图片数×1.5s 一次算死：40 张图（并发 4、单张最多 20s ⇒ 最坏 200s）
+  // 会在 120s 就报「超时」，而后台其实还在正常下载。
+  const armGuard = ms => {
+    clearTimeout(guard);
+    guard = setTimeout(
+      () => finish('超时：后台可能已中断，请先检查下载目录再重试', 'error'),
+      ms
+    );
+  };
+  // 每条 EXPORT_PROGRESS 都续期：只要还在动，就不该判超时
+  guardArm = () => armGuard(60000);
+
+  let tabId = null;
   try {
     const tab = await getActiveTab();
     if (!tab || !WXMD_isWechatArticleUrl(tab.url)) {
       throw new Error('请在微信公众号文章页面使用');
     }
+    tabId = tab.id;
 
     const activeMode = (document.querySelector('.option-card.active') || {}).dataset?.mode || 'download';
     const activeArchiveMode = getSelectedArchiveMode();
-    await chrome.storage.local.set({
-      imageMode: activeMode,
-      folderMode: activeArchiveMode
+
+    // 本次选择走「一次性 override」通道，与浮窗保持一致，不再写 storage。
+    // 写 storage 的副作用：为这一篇临时切到「在线链接」导一次，之后所有导出都变在线，
+    // 用户很难意识到是自己刚才那一下改的。（点卡片本身已按常规方式落库，
+    // 这里只负责保证「界面上显示什么就导什么」。）
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: o => { globalThis.__WXMD_OVERRIDE__ = o; },
+      args: [{ imageMode: activeMode, folderMode: activeArchiveMode }]
     });
 
     const results = await chrome.scripting.executeScript({
-      target: { tabId: tab.id },
+      target: { tabId },
       files: INJECT_FILES
     });
 
@@ -256,26 +337,31 @@ exportBtn.addEventListener('click', async () => {
     }
 
     setStatus(activeMode === 'download' ? '正在下载...' : '正在生成...', '');
+    armGuard(90000);
 
-    // 后台被浏览器强杀、或卡在某个 Promise 上不返回时，消息通道可能一直悬空，
-    // 按钮就会永久 disabled。这里加一个宽松上限做 UI 兜底：
-    // 只放开按钮并如实提示，不谎报成功、也不中断后台可能仍在进行的任务。
-    const imageCount = Array.isArray(articleData.images) ? articleData.images.length : 0;
-    guard = setTimeout(
-      () => finish('超时：后台可能已中断，请先检查下载目录再重试', 'error'),
-      Math.min(600000, 60000 + imageCount * 1500)
-    );
-
-    chrome.runtime.sendMessage({ type: 'EXPORT_ARTICLE', data: articleData }, response => {
-      // 没有这个检查，background 不响应时按钮会永久卡在 disabled
-      if (chrome.runtime.lastError) {
-        finish('失败：' + chrome.runtime.lastError.message, 'error');
-        return;
-      }
-      if (response && response.success) finish('导出成功！', 'success');
-      else finish('失败：' + ((response && response.error) || '未知错误'), 'error');
+    const response = await new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ type: 'EXPORT_ARTICLE', data: articleData }, resp => {
+        // 没有这个检查，background 不响应时按钮会永久卡在 disabled
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+          return;
+        }
+        resolve(resp);
+      });
     });
+
+    if (settled) return;   // 看门狗已经先报过超时，不覆盖提示
+    if (response && response.success) finish(successText(response.stats), 'success');
+    else finish('失败：' + ((response && response.error) || '未知错误'), 'error');
   } catch (err) {
     finish(err.message, 'error');
+  } finally {
+    // 提取失败 / 注入失败时一次性 override 会残留，下次从浮窗导出会误用这次的选择
+    if (tabId !== null) {
+      chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => { delete globalThis.__WXMD_OVERRIDE__; }
+      }).catch(() => {});
+    }
   }
 });

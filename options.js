@@ -9,7 +9,8 @@ const FALLBACK_DEFAULTS = {
   imageFolder: '{{date:YYYY}}/{{date:MM}}/{{date:DD}}',
   imageFilename: 'IMG_{{date:YYYYMMDD}}{{time:HHmmssSSS}}_{{index1}}',
   sharedImageFolder: '{{date:YYYY}}/{{date:MM}}/{{date:DD}}',
-  sharedImageFilename: 'IMG_{{date:YYYYMMDD}}{{time:HHmmssSSS}}_{{index1}}'
+  sharedImageFilename: 'IMG_{{date:YYYYMMDD}}{{time:HHmmssSSS}}_{{index1}}',
+  allowExternalImages: false
 };
 
 // 与 content.js / background.js 共用同一份默认值，避免预览和实际导出走两套规则
@@ -25,7 +26,8 @@ const DEFAULTS = (typeof WXMD_DEFAULTS !== 'undefined')
       imageFolder: WXMD_DEFAULTS.imageFolder,
       imageFilename: WXMD_DEFAULTS.imageFilename,
       sharedImageFolder: WXMD_DEFAULTS.sharedImageFolder,
-      sharedImageFilename: WXMD_DEFAULTS.sharedImageFilename
+      sharedImageFilename: WXMD_DEFAULTS.sharedImageFilename,
+      allowExternalImages: !!WXMD_DEFAULTS.allowExternalImages
     }
   : FALLBACK_DEFAULTS;
 
@@ -59,6 +61,8 @@ const refModeBtns = Array.from(document.querySelectorAll('#imagePathModeGroup [d
 // 自定义前缀阴影块（选项与输入框同块）
 const imageRefPrefixGroup = document.getElementById('imageRefPrefixGroup');
 const imageRefPrefixInput = document.getElementById('imageRefPrefix');
+// 第三方图床开关（下载模式的安全策略，见 lib/defaults.js 的 WXMD_IMG_HOSTS）
+const allowExternalImagesInput = document.getElementById('allowExternalImages');
 
 const ALL_INPUTS = [
   onlineFilenameInput,
@@ -72,7 +76,13 @@ const ALL_INPUTS = [
   imageRefPrefixInput
 ].filter(Boolean);
 
-const isMac = /Mac|iPod|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+// 平台判断与浮窗（floating.js）保持一致：优先 UA-CH 的 platform，再退回
+// navigator.platform，最后兜底 userAgent——两处显示不一致会让人以为是 bug。
+const platformStr = (navigator.userAgentData && navigator.userAgentData.platform)
+  || navigator.platform
+  || navigator.userAgent
+  || '';
+const isMac = /mac|iphone|ipad|ipod/i.test(platformStr) || /Mac OS X/.test(navigator.userAgent || '');
 if (saveKbd) saveKbd.textContent = isMac ? '⌘ S' : 'Ctrl S';
 
 let returnTimer = 0;
@@ -497,6 +507,7 @@ chrome.storage.local.get({
   filenameInput.value = res.imageFilename;
   sharedImageFolderInput.value = res.sharedImageFolder;
   sharedImageFilenameInput.value = res.sharedImageFilename;
+  if (allowExternalImagesInput) allowExternalImagesInput.checked = !!res.allowExternalImages;
 
   // 旧版的「上一级 / 库内绝对路径」在这里一次性迁移成「自定义前缀」，
   // 用户不用重新选一遍；迁移只影响显示，保存时才写回 storage。
@@ -526,6 +537,11 @@ ALL_INPUTS.forEach(input => {
     schedulePreview();
   });
 });
+
+// 复选框不是文本输入，input 事件在部分情况下不触发，单独挂 change 做脏标记
+if (allowExternalImagesInput) {
+  allowExternalImagesInput.addEventListener('change', () => markDirty());
+}
 
 // 选择项（图片处理方式 / 归档方式）点击即生效，与弹窗、浮窗共用同一份 storage
 modeCards.forEach(card => {
@@ -659,6 +675,26 @@ if (mainContainer && backToTopBtn) {
 saveBtn.addEventListener('click', () => {
   const mode = getSelectedFolderMode();
 
+  // 空模板不是「没填」而是「全部撞同一个名字」：
+  // 模板解析成空串后 background 会兜底成 article，于是所有文章都写进
+  // article/article.md，Chrome 依次改名 article (1).md、article (2).md，
+  // 图片也全混在一个目录里。这种失败不报错，只能在事后发现，必须挡在保存时。
+  if (!onlineFilenameInput.value.trim()) {
+    alert('「保留在线链接」模式的 Markdown 文件名不能为空。');
+    return;
+  }
+
+  if (mode === 'per-article') {
+    if (!downloadFolderInput.value.trim()) {
+      alert('逐篇归档的「导出的文件夹及 Markdown 名称」不能为空。');
+      return;
+    }
+    if (!filenameInput.value.trim()) {
+      alert('逐篇归档的图片文件命名不能为空。');
+      return;
+    }
+  }
+
   if (mode === 'shared') {
     if (!sharedFolderInput.value.trim()) {
       alert('共享文件夹名称不能为空。');
@@ -670,6 +706,10 @@ saveBtn.addEventListener('click', () => {
     }
     if (!sharedFilenameInput.value.trim()) {
       alert('平铺归档模式下的 Markdown 文件名不能为空。');
+      return;
+    }
+    if (!sharedImageFilenameInput.value.trim()) {
+      alert('平铺归档模式的图片文件命名不能为空。');
       return;
     }
   }
@@ -698,7 +738,8 @@ saveBtn.addEventListener('click', () => {
     imageFolder: folderInput.value.trim(),
     imageFilename: filenameInput.value.trim(),
     sharedImageFolder: sharedImageFolderInput.value.trim(),
-    sharedImageFilename: sharedImageFilenameInput.value.trim()
+    sharedImageFilename: sharedImageFilenameInput.value.trim(),
+    allowExternalImages: !!(allowExternalImagesInput && allowExternalImagesInput.checked)
   }).then(() => {
     markSaved();
     scheduleReturnToSource();

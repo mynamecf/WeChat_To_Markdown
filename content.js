@@ -1,15 +1,26 @@
 // content.js —— 提取文章正文并转换为 Markdown
 // 注入顺序（顺序不能乱，后面的依赖前面的全局变量）：
-//   lib/defaults.js → lib/naming.js → lib/turndown.js → lib/turndown-plugin-gfm.js
-//   → lib/codeblock.js → lib/compat.js → lib/attachment.js → content.js
+//   见 lib/injectlist.js 的 WXMD_INJECT_FILES（唯一来源，background / popup 都引用它）
 // 分工：代码块 = lib/codeblock.js，特殊排版 = lib/compat.js，
-//       视频/语音附件 = lib/attachment.js，其余（图片、引用、列表、段落、YAML）在本文件。
+//       引用块/列表 = lib/blocks.js，表格 = lib/tables.js，
+//       视频/语音附件 = lib/attachment.js，图片消息（图文/小绿书）= lib/imagepost.js，
+//       其余（图片、段落、YAML）在本文件。
 (async function () {
-  const VERSION = 'v34-2026-11-13';
+  // 版本号只有 manifest 一个来源，避免「manifest 升了、日志里还是旧版本」查错方向
+  const VERSION = (function () {
+    try { return 'v' + chrome.runtime.getManifest().version; } catch (e) { return 'unknown'; }
+  })();
   const DEBUG = false;
   const LOG = DEBUG ? (...args) => console.log('[wechat-to-md ' + VERSION + ']', ...args) : () => {};
 
+  // 正文根节点候选，按顺序命中第一个。
+  //   1. #js_content：普通图文的正式容器；
+  //   2. .rich_media_content：#js_content 的 class，个别模板只留 class；
+  //   3. #js_image_content：图片消息（图文/小绿书），某些版本不套 #js_content，
+  //      这时正文（标题 + 描述）就在它里面，图片由 lib/imagepost.js 从轮播区补。
+  // 只认第一个的话，第 3 种模板会直接报「未找到文章正文」。
   const ARTICLE_SELECTOR = '#js_content';
+  const ARTICLE_ROOT_SELECTORS = [ARTICLE_SELECTOR, '.rich_media_content', '#js_image_content'];
   const TITLE_SELECTOR = '#activity-name';
   const AUTHOR_SELECTOR = '#js_name';
   const PUBLISH_TIME_SELECTOR = '#publish_time';
@@ -20,6 +31,9 @@
     ? WXMD_ATTACH.PLAYER_CHROME_SEL
     : '.video_iframe, .appmsg_video, .feed-wrapper, .video_tail_module';
 
+  // 围栏代码块整体跳过，细节见 tidyMarkdown
+  const FENCE_RE = /(^|\n)(```[^\n]*\n[\s\S]*?\n```[ \t]*(?=\n|$))/g;
+
   // 浮窗传来的「本次选择」，用完即弃，不写回 storage
   const override = globalThis.__WXMD_OVERRIDE__ || {};
   try { delete globalThis.__WXMD_OVERRIDE__; } catch (e) {}
@@ -29,6 +43,7 @@
     : {
         imageMode: 'download',
         folderMode: 'per-article',
+        allowExternalImages: false,
         imagePathMode: 'note',
         imageRefPrefix: '/微信/{{noteFolder}}/',
         onlineFilename: '{{date:YYYYMMDD}}_{{title}}',
@@ -75,10 +90,13 @@
             || (a === 169 && b === 254)
             || (a === 100 && b >= 64 && b <= 127);
         }
-        return !h.includes('.');
+        return !h.includes('.') && !h.includes(':');
       };
 
   const settings = await chrome.storage.local.get(DEFAULTS);
+
+  // 是否下载「非微信图床」的图片，见 lib/defaults.js 的 WXMD_DEFAULTS.allowExternalImages
+  const allowExternalImages = !!settings.allowExternalImages;
 
   const imageMode = (override.imageMode === 'online' || override.imageMode === 'download')
     ? override.imageMode
@@ -157,7 +175,14 @@
 
   // ---------- 正文提取 ----------
 
-  const contentEl = document.querySelector(ARTICLE_SELECTOR);
+  let contentEl = null;
+  for (const sel of ARTICLE_ROOT_SELECTORS) {
+    contentEl = document.querySelector(sel);
+    if (contentEl) {
+      if (sel !== ARTICLE_SELECTOR) LOG('article root fallback:', sel);
+      break;
+    }
+  }
   if (!contentEl) {
     return { success: false, error: '未找到文章正文' };
   }
@@ -176,6 +201,17 @@
     WXMD_ATTACH.collect(clone, LOG);   // 内部会 LOG('attachments', n)
   } else {
     console.error('[wx-md] lib/attachment.js 未加载，本次导出的视频/语音不会生成链接');
+  }
+
+  // ---------- 图片消息（图文/小绿书）：图片在正文容器之外 ----------
+  // 这种模板下 #js_content 里只有文字，图片全在 #img_list 轮播区，
+  // 所以 clone 里一张 <img> 都没有。模块把图按顺序补进 clone、删掉 UI 噪音，
+  // 之后就与普通图文完全同构，下面的图片统计与下载链路原样复用。
+  // 实现见 lib/imagepost.js；不是图片消息时内部直接返回，普通图文零影响。
+  if (typeof WXMD_IMAGEPOST !== 'undefined' && typeof WXMD_IMAGEPOST.prepare === 'function') {
+    WXMD_IMAGEPOST.prepare(clone, document, LOG);   // 内部会 LOG('image post', n)
+  } else {
+    console.error('[wx-md] lib/imagepost.js 未加载，图片消息类文章可能导出 0 张图');
   }
 
   // ---------- 图片：唯一会下载的附件 ----------
@@ -199,9 +235,9 @@
     img.removeAttribute('data-src');
 
     if (imageMode === 'download') {
-      // 图片地址完全由文章作者控制：内网 / 本机地址一律不下载，否则恶意文章
-      // 能让扩展带着用户身份去请求内网设备（blind SSRF）。这里只降级为在线链接，
-      // 不删除节点，避免静默丢内容。
+      // 图片地址完全由文章作者控制：内网 / 本机地址，以及（默认）非微信图床的地址
+      // 一律不下载，否则恶意文章能让扩展带着用户身份去请求内网设备（blind SSRF）。
+      // 这里只降级为在线链接，不删除节点，避免静默丢内容。
       if (!isDownloadableImageUrl(realSrc)) {
         blockedImages++;
         return;
@@ -215,16 +251,25 @@
 
   if (blockedImages > 0) {
     console.warn(
-      `[wx-md] 已跳过 ${blockedImages} 张指向内网/本机地址的图片，仅保留在线链接`
+      `[wx-md] ${blockedImages} 张图片未下载（内网地址或非微信图床），已保留在线链接`
     );
   }
 
-  /** 可下载的图片地址：仅 http(s)，且不指向内网 / 本机（失败时按不可下载处理） */
+  /** 可下载的图片地址：仅 http(s)、不指向内网，且（默认）命中微信图床白名单 */
   function isDownloadableImageUrl(u) {
     try {
       const parsed = new URL(u);
       if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-      return !isPrivateHost(parsed.hostname);
+      if (isPrivateHost(parsed.hostname)) return false;
+      // 字面 hostname 判断挡不住「域名解析到内网」的 SSRF（扩展里没有 DNS 能力），
+      // 所以默认只下载已知图床；确有可信第三方图床时在配置页打开 allowExternalImages。
+      if (!allowExternalImages) {
+        const isWxHost = typeof WXMD_isWechatImageHost === 'function'
+          ? WXMD_isWechatImageHost(parsed.hostname)
+          : true;   // 兜底模块缺失时不误杀，宁可少一层防护也不要整篇图变在线链接
+        if (!isWxHost) return false;
+      }
+      return true;
     } catch (e) {
       return false;
     }
@@ -255,7 +300,8 @@
   //      先定归属，引用块内部不再做任何结构改写；
   //   3. 特殊排版（lib/compat.js）——手写序号改写成 <ol start>、浮动序号并回正文、
   //      伪标题换成 h2/h3，内部会跳过 blockquote / li / pre / table；
-  //   4. 嵌套列表归位——只动 ul/ol 的父子关系。
+  //   4. 嵌套列表归位——只动 ul/ol 的父子关系；
+  //   5. 表格单元格摊平——把单元格里的块级容器压成一行，否则整张表退化成普通段落。
   // 2 在 3 前面是有意的：宁可把「带左边框的标题」当引用块，也不要把引用块
   // 拆成标题——引用块的边框是作者明确的排版意图，标题只是我们的猜测。
 
@@ -268,7 +314,11 @@
     console.error('[wx-md] lib/codeblock.js 未加载，本次导出的代码块可能失真');
   }
 
-  normalizeQuotes(clone);
+  if (WXMD_BLOCKS && typeof WXMD_BLOCKS.normalizeQuotes === 'function') {
+    WXMD_BLOCKS.normalizeQuotes(clone, LOG);
+  } else {
+    console.error('[wx-md] lib/blocks.js 未加载，本次导出的引用块可能失真');
+  }
 
   // 特殊排版兼容（浮动序号、伪标题等）在 lib/compat.js，后续同类兼容都往那里加
   if (WXMD_COMPAT && typeof WXMD_COMPAT.normalizeCompat === 'function') {
@@ -277,7 +327,20 @@
     console.error('[wx-md] lib/compat.js 未加载，个别特殊排版（如「一、背景」这类伪标题）可能失真');
   }
 
-  normalizeNestedLists(clone);
+  if (WXMD_BLOCKS && typeof WXMD_BLOCKS.normalizeNestedLists === 'function') {
+    WXMD_BLOCKS.normalizeNestedLists(clone, LOG);
+  } else {
+    console.error('[wx-md] lib/blocks.js 未加载，嵌套列表可能被拍平成一级');
+  }
+
+  // 表格单元格：把单元格里的块级结构（section / p / div）摊平成一行。
+  // 不做这一步的话，wechatSection 规则会在每个单元格内部补空行，
+  // GFM 表格一行就是一行，空行会把整张表拆成一堆带「|」的普通段落。
+  if (WXMD_TABLES && typeof WXMD_TABLES.normalizeTableCells === 'function') {
+    WXMD_TABLES.normalizeTableCells(clone, LOG);
+  } else {
+    console.error('[wx-md] lib/tables.js 未加载，本次导出的表格可能退化成普通段落');
+  }
 
   // 修复真 <pre> 里的 <br>：用 DOM 操作，避免 innerHTML 重建整棵子树
   clone.querySelectorAll('pre br').forEach(br => br.replaceWith('\n'));
@@ -308,6 +371,8 @@
     replacement: (content, node) => {
       const trimmed = content.replace(/^\n+|\n+$/g, '');
       if (!trimmed) return '';
+      // 表格单元格里不能有空行：GFM 表格一行就是一行，单元格内换行会把这一行拆散
+      if (node.closest('th, td')) return trimmed;
       const inBlockquote = !!node.closest('blockquote');
       // 列表项里的 section 只是那一项的内容，多补空行会把紧凑列表撑成松散列表
       if (node.closest('li')) return inBlockquote ? '\n\n' + trimmed + '\n\n' : content;
@@ -331,9 +396,16 @@
       const img = (imageMode === 'download' && idx !== null)
         ? `![${alt}]({{IMG_${idx}}})`
         : `![${alt}](${src})`;
-      return '\n\n' + img + '\n\n';
+      // 表格单元格里的图片不能带空行，否则整行被拆散
+      return node.closest('th, td') ? img : '\n\n' + img + '\n\n';
     }
   });
+
+  // 表格的两条规则（单元格压成一行、单元格内 <br> 写字面 <br>）在 lib/tables.js。
+  // 必须排在 gfm 的 tableCell 之后注册：Turndown 后注册的规则优先，否则被 gfm 覆盖回旧行为。
+  if (WXMD_TABLES && typeof WXMD_TABLES.installRules === 'function') {
+    WXMD_TABLES.installRules(turndownService);
+  }
 
   // 视频 / 语音：不下载本体，只写在线链接；label 里带来源，点开前就知道是什么
   turndownService.addRule('wxmdAttachmentLink', {
@@ -346,34 +418,36 @@
     }
   });
 
-  // 移除空的装饰性 span/div
+  // 装饰性的空 span/div 清掉，同时保住 div 的块级间距。
   // 注意：textContent 不统计元素，<div style><img></div> 的 textContent 也是空。
   // 直接判空会把已渲染好的 {{IMG_n}} 一起丢掉（图片下载了却无人引用），
   // 因此必须先用 querySelector 兜住 void/媒体元素，与 Turndown 的 hasVoid 判定对齐。
   turndownService.addRule('removeEmptyInline', {
     filter: ['span', 'div'],
     replacement: (content, node) => {
-      if (!node.getAttribute('style')) return content;
-      if (content.trim()) return content;
-      if (node.querySelector('img, br, svg, video, audio, iframe, canvas, input, picture, wxmd-link')) {
-        return content;
+      const trimmed = content.replace(/^\n+|\n+$/g, '');
+      if (!trimmed) {
+        if (node.querySelector('img, br, svg, video, audio, iframe, canvas, input, picture, wxmd-link')) {
+          return content;
+        }
+        return '';
       }
-      return '';
+      // span 是行内元素：原样返回
+      if (node.nodeName !== 'DIV') return content;
+      // div 是块级元素：必须自己补空行。早先这里统一 return content，
+      // Turndown 默认规则给的块级间距被吞掉 —— 用 <div> 直装正文段落的文章
+      // （转载模板、部分第三方编辑器）整篇会粘成一段，不报错、不告警。
+      if (node.closest('th, td')) return trimmed;        // 表格单元格里不能有换行
+      if (node.closest('li')) return content;            // 列表项里补空行会把紧凑列表撑散
+      return '\n\n' + trimmed + '\n\n';
     }
   });
 
   // 直接传 DOM 节点：这版 Turndown 的 RootNode 对非字符串入参走 input.cloneNode(true)，
   // 省掉「序列化成 innerHTML → DOMParser 重新解析」的一整圈往返。
-  // 多出来的根节点是 <div>，前后空行会被下面的 ^\n+ / \n+$ 清理掉，输出不变。
+  // 多出来的根节点是 <div>，前后空行会被 tidyMarkdown 的清尾清理掉，输出不变。
   let markdown = turndownService.turndown(clone);
-  markdown = markdown
-    .replace(/^> +$/gm, '>')
-    // 空段落里的 <br> 会留下一整行只有空格（"  "），markdown 里没有意义，
-    // 渲染出来就是图片和正文之间多一行空白。先清掉再压缩空行。
-    .replace(/^[ \t]+$/gm, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .replace(/^\n+/, '')
-    .replace(/\n+$/, '');
+  markdown = tidyMarkdown(markdown);
 
   // YAML 单引号风格：只需把 ' 转义成 ''，换行折叠为空格。
   // 单引号标量本身会把 \u2028/\u2029/\u0085 折叠成空格，不会破坏结构；
@@ -395,82 +469,44 @@
   markdown = frontmatter + markdown + '\n';
 
   // ---------- 内部工具函数 ----------
-  // 只在本文件用：模板解析在 lib/naming.js、代码块在 lib/codeblock.js、
-  // 特殊排版兼容在 lib/compat.js、附件在 lib/attachment.js。
-  // 下面两个是「结构归一」步骤里调用的，函数声明在这里、调用在不远处，改动时一起看。
+  // 只在本文件用：模板解析 lib/naming.js、代码块 lib/codeblock.js、特殊排版 lib/compat.js、
+  // 引用块/列表 lib/blocks.js、表格 lib/tables.js、附件 lib/attachment.js。
+  // 本文件只剩「收尾整理」这一件事。
 
-  /** 带左右边框的 section/div → blockquote（微信里的引用块全靠样式画的） */
-  function normalizeQuotes(root) {
-    // 只处理 style 里带左右边框的元素：微信正文的 section/div 动辄几千个，
-    // 而真正构成引用块的通常个位数，先让属性选择器筛一遍再逐条判定。
-    // i 标志是 CSS4 大小写不敏感，覆盖 FONT-FAMILY / BORDER-LEFT 这类写法。
-    const candidates = Array.from(
-      root.querySelectorAll('[style*="border-left" i], [style*="border-right" i]')
-    );
-    let count = 0;
-
-    // 逆序：内层先转，外层再判断时能通过 closest/querySelector 感知到已转换的 blockquote，
-    // 避免产出 > > > 的多层嵌套。querySelectorAll 返回文档顺序，筛选后顺序不变。
-    for (let i = candidates.length - 1; i >= 0; i--) {
-      const el = candidates[i];
-      if (!el.parentNode) continue;
-      if (el.closest('pre') || el.closest('blockquote')) continue;
-      // 真 <h1>~<h6> 是作者/Turndown 都认的结构，左边框只是装饰（「### 获取 Token」
-      // 这种标题常配一条竖线），不能反过来把它拆成引用块——那是伪标题才有的猜测
-      if (el.closest('h1, h2, h3, h4, h5, h6')) continue;
-
-      const style = el.getAttribute('style') || '';
-      if (/font-family[^;]*monospace/i.test(style)) continue;
-      if (!/border-(left|right)\s*:\s*[1-9]\d*px\s+(solid|dashed|dotted)/i.test(style)) continue;
-      if (!el.textContent.trim()) continue;
-
-      // 不要把承载图片/表格/代码的容器整体变成引用块
-      if (el.querySelector('img, table, pre, blockquote')) continue;
-
-      const bq = document.createElement('blockquote');
-      while (el.firstChild) bq.appendChild(el.firstChild);
-      el.replaceWith(bq);
-      count++;
-    }
-
-    LOG('blockquotes:', count);
+  /** 段内整理：清掉只含空格的空段落、压缩三连以上空行 */
+  function tidyText(seg) {
+    return seg
+      .replace(/^> +$/gm, '>')
+      // 空段落里的 <br> 会留下一整行只有空格（"  "），markdown 里没有意义，
+      // 渲染出来就是图片和正文之间多一行空白。先清掉再压缩空行。
+      .replace(/^[ \t]+$/gm, '')
+      .replace(/\n{3,}/g, '\n\n');
   }
 
-  // ---------- 列表 ----------
-
   /**
-   * 修「子列表直接挂在列表容器下」的不规范结构。
+   * 收尾整理。
    *
-   * 微信 / 秀米导出的目录树常写成：
-   *   <ul>
-   *     <li>简单使用</li>
-   *     <ul><li>引入依赖</li><li>requestBody 参数校验</li></ul>   ← 没包进 <li>
-   *   </ul>
-   *
-   * Turndown 只认「<li> 内部的嵌套列表」这一种层级（rules.listItem 靠 li 深度缩进），
-   * 子列表挂在 ul 下会被当成同级内容，所有子项拍平成一级——看起来就是「没有缩进」。
-   * 这里把这类子列表挂回前一个 <li> 末尾，层级交给 Turndown 恢复正常。
+   * 必须跳过围栏代码块：整篇替换会把代码里的两个连续空行压成一个、
+   * 把「只含空格的缩进行」清成空行。对多数语言无害，但对
+   * 「代码块里嵌 Markdown 示例」「Makefile 的 tab 行」这类内容会直接失真。
+   * 已知限制：代码块内部本身若含一行 ```，会被当成分隔符提前切断（极罕见）。
    */
-  function normalizeNestedLists(root) {
-    // 逆序：内层先归位，外层处理时结构已稳定
-    const nested = Array.from(root.querySelectorAll('ul > ul, ul > ol, ol > ul, ol > ol')).reverse();
-    let moved = 0;
+  function tidyMarkdown(md) {
+    const trimEdges = s => s.replace(/^\n+/, '').replace(/\n+$/, '');
+    if (md.indexOf('```') < 0) return trimEdges(tidyText(md));
 
-    for (const list of nested) {
-      if (!list.parentNode) continue;
-      // 只认「前面紧挨着的 li」；中间夹了有文字的其它节点就不动，
-      // 免得把子列表挂到不相干的条目下面（宁可平铺也不要挂错父项）
-      let prev = list.previousElementSibling;
-      while (prev && prev.tagName !== 'LI' && !(prev.textContent || '').trim()) {
-        prev = prev.previousElementSibling;
-      }
-      if (!prev || prev.tagName !== 'LI') continue;
-
-      prev.appendChild(list);
-      moved++;
+    let out = '';
+    let last = 0;
+    let m;
+    FENCE_RE.lastIndex = 0;
+    while ((m = FENCE_RE.exec(md)) !== null) {
+      const start = m.index + m[1].length;
+      out += tidyText(md.slice(last, start));
+      out += m[2];
+      last = start + m[2].length;
     }
-
-    LOG('nested lists moved:', moved);
+    out += tidyText(md.slice(last));
+    return trimEdges(out);
   }
 
   return {
@@ -488,6 +524,7 @@
     sharedFilename: resolvedSharedFilename,
     imageFolder: resolvedImageFolder,
     images: imageList,
+    blockedImages,
     meta: articleMeta,
     url
   };

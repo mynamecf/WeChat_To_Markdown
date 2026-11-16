@@ -1,8 +1,11 @@
-// background.js —— 集中处理所有 IO（提取调度 / 路径净化 / 下载）
+// background.js —— 导出调度、路径规划与下载编排（下载原语在 lib/download.js）
 importScripts('lib/defaults.js');
 // 图片引用路径的拼装规则与配置页预览共用 lib/naming.js，
 // 否则「预览显示的链接」和「md 里真实写的链接」迟早会漂移。
 importScripts('lib/naming.js');
+// 注入清单与 executeScript 结果解析（唯一来源，popup 也引用同一份）
+importScripts('lib/injectlist.js');
+importScripts('lib/download.js');
 
 const IMG_CONCURRENCY = 4;          // 图片并发下载上限
 // 必须小于 MV3 service worker 的 30 秒空闲回收阈值。
@@ -11,6 +14,7 @@ const IMG_CONCURRENCY = 4;          // 图片并发下载上限
 // sendResponse 永不回调，popup / 浮窗的导出按钮会永久停在 disabled。
 const DOWNLOAD_TIMEOUT = 20000;     // 单个下载超时（ms）
 const MAX_MARKDOWN_BYTES = 1400000; // data URL 上限保护（base64 后约 1.9MB）
+const PROGRESS_MIN_INTERVAL = 500;  // 进度消息节流（ms）
 
 // 首次安装时把默认配置落库，保证 popup / options / content 读到同一套值
 chrome.runtime.onInstalled.addListener(async () => {
@@ -35,14 +39,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === 'EXPORT_ARTICLE') {
     handleExport(message.data)
-      .then(() => sendResponse({ success: true }))
+      .then(stats => sendResponse({ success: true, stats }))
       .catch(err => sendResponse({ success: false, error: err.message }));
     return true;
   }
 
   if (message.type === 'EXPORT_FROM_FLOATING') {
     handleExportFromFloating(sender, message.data)
-      .then(() => sendResponse({ success: true }))
+      .then(stats => sendResponse({ success: true, stats }))
       .catch(err => sendResponse({ success: false, error: err.message }));
     return true;
   }
@@ -117,24 +121,15 @@ async function handleExportFromFloating(sender, options) {
 
     const results = await chrome.scripting.executeScript({
       target: { tabId },
-      files: [
-        'lib/defaults.js',
-        'lib/naming.js',
-        'lib/turndown.js',
-        'lib/turndown-plugin-gfm.js',
-        'lib/codeblock.js',
-        'lib/compat.js',
-        'lib/attachment.js',
-        'content.js'
-      ]
+      files: WXMD_INJECT_FILES
     });
 
-    const articleData = pickArticleData(results);
+    const articleData = WXMD_pickArticleData(results);
     if (!articleData || !articleData.success) {
       throw new Error((articleData && articleData.error) || '提取失败（未获取到页面返回数据）');
     }
 
-    await handleExport(articleData);
+    return await handleExport(articleData);
   } finally {
     // 注入失败（页面跳转 / 标签页关闭 / 上下文失效）时全局变量会残留，
     // 下一次从 popup 导出就会误用上一次浮窗的选择。成功路径上 content.js 已删过，重复删无害。
@@ -150,17 +145,61 @@ function clearOverride(tabId) {
   }).catch(() => {});
 }
 
-/**
- * executeScript 多文件注入时，results 里只有 content.js 那一项带实际返回值。
- * 从后往前找第一个像样的结果，不依赖固定下标。
- */
-function pickArticleData(results) {
-  if (!Array.isArray(results)) return null;
-  for (let i = results.length - 1; i >= 0; i--) {
-    const r = results[i] && results[i].result;
-    if (r && typeof r === 'object' && typeof r.success === 'boolean') return r;
+// ---------- 导出锁（同一篇文章不允许并行导出） ----------
+
+// 浮窗按钮有 disabled，popup 按钮也有，但两个入口可以同时触发
+// （浮窗点一次、立刻开弹窗再点一次），两套下载并发 8 路、conflictAction 互相改名，
+// 结果是图片目录堆副本、md 指向不确定的那一份。
+// 按「文章 URL」加锁而不是全局锁：不同文章同时导出是合理需求。
+const EXPORT_LOCK_TTL = 10 * 60 * 1000;
+const exportLocks = new Map();   // key -> 开始时间戳
+
+function lockKeyOf(article) {
+  const url = article && typeof article.url === 'string' ? article.url : '';
+  const title = article && typeof article.title === 'string' ? article.title : '';
+  return url || title || 'unknown';
+}
+
+function acquireExportLock(key) {
+  const now = Date.now();
+  // 过期锁自愈：SW 被回收、异常退出时 finally 不会执行，留着会永久卡死这篇
+  for (const [k, at] of exportLocks) {
+    if (now - at > EXPORT_LOCK_TTL) exportLocks.delete(k);
   }
-  return null;
+  if (exportLocks.has(key)) return false;
+  exportLocks.set(key, now);
+  return true;
+}
+
+function releaseExportLock(key) {
+  exportLocks.delete(key);
+}
+
+// ---------- 进度上报 ----------
+
+/**
+ * 让前端知道「还在动」，用于看门狗续期。
+ *
+ * 前端算不出真实耗时（图片数 × 单张超时），原先固定 60s + N×1.5s 的看门狗
+ * 会在 20 张以上图片时提前报「超时」，而后台其实还在下载。
+ * 这里每完成一张图（节流 500ms）发一条进度，前端收到就续期。
+ * 没有接收方时 sendMessage 会 reject，必须吞掉，否则会打断导出。
+ */
+function createProgressReporter(total) {
+  let done = 0;
+  let lastAt = 0;
+  return function tick() {
+    done++;
+    const now = Date.now();
+    if (now - lastAt < PROGRESS_MIN_INTERVAL && done < total) return;
+    lastAt = now;
+    try {
+      const p = chrome.runtime.sendMessage({ type: 'EXPORT_PROGRESS', done, total });
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch (e) {
+      // 没有接收方（popup 已关、浮窗已卸载）时忽略
+    }
+  };
 }
 
 // ---------- 图片引用路径 ----------
@@ -176,10 +215,7 @@ function normalizeImagePathMode(mode) {
   return (mode === 'relative' || mode === 'custom') ? mode : 'note';
 }
 
-/**
- * 归一成 { mode, prefix }（含旧版 parent / vault 的迁移）。
- * 有 naming 模块时以它为准，缺了就退回最基本的判断，保证导出不会因缺依赖崩掉。
- */
+/** 归一成 { mode, prefix }（含旧版 parent / vault 的迁移） */
 function resolveImageRefConfig(article) {
   if (typeof WXMD_NAMING !== 'undefined' && typeof WXMD_NAMING.resolveImageRefConfig === 'function') {
     return WXMD_NAMING.resolveImageRefConfig(article || {});
@@ -191,11 +227,7 @@ function resolveImageRefConfig(article) {
   };
 }
 
-/**
- * 生成 Markdown 里的图片路径。
- * 权威实现在 lib/naming.js（配置页预览用的是同一份），这里只做一层降级垫片，
- * 防止 service worker 里 importScripts 意外失败时整篇导出崩掉。
- */
+/** 生成 Markdown 里的图片路径（权威实现在 lib/naming.js，配置页预览用的是同一份） */
 function makeImageRef(mode, imgDir, filename, noteFolder, prefix) {
   if (typeof WXMD_NAMING !== 'undefined' && typeof WXMD_NAMING.buildImageRef === 'function') {
     return WXMD_NAMING.buildImageRef(mode, imgDir, filename, noteFolder, prefix);
@@ -220,36 +252,63 @@ function makeImageRef(mode, imgDir, filename, noteFolder, prefix) {
 
 // ---------- 核心导出 ----------
 
+/**
+ * @returns {Promise<{total:number, failed:number, blocked:number, unresolved:number}>}
+ *          统计回传前端：只显示「导出成功」而不说有几张图没下来，
+ *          用户下次打开笔记看到裂图才发现，已经不知道该找什么了。
+ */
 async function handleExport(article) {
-  if (!article || typeof article.markdown !== 'string') {
+  if (!article || typeof article.markdown !== 'string' || !article.markdown.trim()) {
     throw new Error('导出数据无效（缺少 markdown 内容）');
   }
 
+  const key = lockKeyOf(article);
+  if (!acquireExportLock(key)) {
+    throw new Error('这篇文章正在导出中，请等上一次完成后再试');
+  }
+  try {
+    return await doExport(article);
+  } finally {
+    releaseExportLock(key);
+  }
+}
+
+async function doExport(article) {
   const imageMode = article.imageMode === 'online' ? 'online' : 'download';
   const folderMode = article.folderMode === 'shared' ? 'shared' : 'per-article';
   const images = Array.isArray(article.images) ? article.images : [];
+  const stats = { total: 0, failed: 0, blocked: 0, unresolved: 0 };
+  // content.js 在收集阶段就已经拦掉一批（内网地址 / 非微信图床），它们根本没进 images 列表，
+  // 但用户同样需要知道「这几张没下载」——从提取结果里接过来一起报。
+  stats.blocked += Number(article.blockedImages) || 0;
 
   // 图片链接在 md 里怎么写（相对笔记 / 库内模糊 / 自定义前缀）
   const imageRef = resolveImageRefConfig(article);
 
+  const { allowExternalImages } = await chrome.storage.local.get({ allowExternalImages: false });
+
   let markdown = article.markdown;
   let targetFolder = '';
-  let targetFile = '';
+  let mdName = '';
 
   if (imageMode === 'online') {
-    const mdName = safePath(article.onlineFilename) || 'article';
-    targetFile = `${mdName}.md`;
+    // 在线模式不建目录，md 直接落在下载根目录
+    mdName = safePath(article.onlineFilename) || 'article';
   } else if (folderMode === 'shared') {
     targetFolder = safePath(article.sharedFolder) || 'article';
-    const mdName = safePath(article.sharedFilename || article.onlineFilename) || 'article';
-    targetFile = `${targetFolder}/${mdName}.md`;
+    mdName = safePath(article.sharedFilename || article.onlineFilename) || 'article';
   } else {
     targetFolder = safePath(article.downloadFolder) || 'article';
     // 允许 downloadFolder 模板带子目录，但 md 文件名只用最后一段，
     // 避免出现 a/b/a/b.md 这种重复嵌套
-    const mdName = targetFolder.split('/').pop() || 'article';
-    targetFile = `${targetFolder}/${mdName}.md`;
+    mdName = targetFolder.split('/').pop() || 'article';
   }
+
+  // 目录过长时先统一压一次：md 与图片必须落在同一棵「压缩后」的树下，
+  // 否则 limitPath 只裁了图片路径、md 里的引用还是完整目录，链接必然对不上。
+  if (targetFolder) targetFolder = limitPath(targetFolder, 160);
+
+  const targetFile = targetFolder ? `${targetFolder}/${mdName}.md` : `${mdName}.md`;
 
   if (imageMode === 'download' && images.length > 0) {
     const imgDir = safePath(article.imageFolder);
@@ -262,66 +321,138 @@ async function handleExport(article) {
         realExt: extFromUrl(item && item.url)
       };
     });
+    stats.total = items.length;
+
+    // 图片目录与文件名一起按「剩余预算」压：保证「实际落盘路径」和「md 引用」
+    // 用的是同一组 imgDir / filename，不会一个裁了一个没裁。
+    const budget = Math.max(20, 200 - (targetFolder ? targetFolder.length + 1 : 0));
+    const planned = items.map(item => {
+      const fit = fitImageRel(imgDir, `${item.filenameBase}.${item.realExt}`, budget);
+      return fit;
+    });
 
     // 先算出预算路径：下载失败时仍要落到一个合理的相对路径上
     const pathByIndex = new Map();
-    items.forEach((item, i) => {
-      const filename = `${item.filenameBase}.${item.realExt}`;
-      pathByIndex.set(i, makeImageRef(imageRef.mode, imgDir, filename, targetFolder, imageRef.prefix));
+    planned.forEach((fit, i) => {
+      pathByIndex.set(i, makeImageRef(imageRef.mode, fit.imgDir, fit.filename, targetFolder, imageRef.prefix));
     });
+
+    // 体积预检：在线/本地两种模式的 md 体积都能在下载前估出来。
+    // 原来要等所有图片落盘才在 toDataUrl 里撞上限，此时磁盘上已是一堆没人引用的孤儿图片。
+    assertMarkdownSize(estimateMarkdownBytes(markdown, pathByIndex), 'download');
 
     // Chrome 命中同名文件时会改名成 "xxx (1).webp"，与上面预算的名字不同。
     // 因此占位符替换推迟到下载结束：优先用真实文件名，取不到再回退预算值。
     const actualPath = new Map();
+    const reportProgress = createProgressReporter(items.length);
 
-    let failed = 0;
-    let blocked = 0;
-    await mapLimit(items, IMG_CONCURRENCY, async (item, i) => {
-      if (!/^https?:\/\//i.test(item.url)) return;
-      if (!isDownloadableImageUrl(item.url)) {
-        blocked++;
-        // 不下载，但把原始地址写回去，避免 md 里留下未替换的 {{IMG_n}}
-        actualPath.set(i, item.url);
-        return;
-      }
-      const filename = `${item.filenameBase}.${item.realExt}`;
-      const downloadPath = limitPath(
-        imgDir ? `${targetFolder}/${imgDir}/${filename}` : `${targetFolder}/${filename}`
-      );
+    await WXMD_DL.mapLimit(items, IMG_CONCURRENCY, async (item, i) => {
       try {
-        const res = await downloadFile(item.url, downloadPath);
-        if (res && res.filename && res.filename !== filename) {
+        if (!/^https?:\/\//i.test(item.url)) return;
+        if (!isDownloadableImageUrl(item.url, allowExternalImages)) {
+          stats.blocked++;
+          // 不下载，但把原始地址写回去，避免 md 里留下未替换的 {{IMG_n}}
+          actualPath.set(i, item.url);
+          return;
+        }
+        const fit = planned[i];
+        const downloadPath = targetFolder
+          ? `${targetFolder}/${fit.imgDir ? fit.imgDir + '/' : ''}${fit.filename}`
+          : (fit.imgDir ? fit.imgDir + '/' : '') + fit.filename;
+        const res = await WXMD_DL.downloadFile(item.url, downloadPath, DOWNLOAD_TIMEOUT);
+        if (res && res.filename && res.filename !== fit.filename) {
           // uniquify 产生的 "a (1).webp" 含空格与括号，直接塞进 markdown 会截断链接，
           // 只把空格编码掉（括号成对出现，CommonMark 可解析）
           const realName = res.filename.replace(/ /g, '%20');
-          actualPath.set(i, makeImageRef(imageRef.mode, imgDir, realName, targetFolder, imageRef.prefix));
+          actualPath.set(i, makeImageRef(imageRef.mode, fit.imgDir, realName, targetFolder, imageRef.prefix));
         }
       } catch (err) {
-        failed++;
+        stats.failed++;
+        // 失败时也要写一个真实可达的地址：回落到「按命名模板预算的路径」会指向
+        // 一个并不存在的文件，md 里就是一张裂图；回写原始 URL 至少还能点开看。
+        actualPath.set(i, item.url);
         console.warn('[wx-md] 图片下载失败:', item.url, err.message);
+      } finally {
+        reportProgress();
       }
     });
 
     // 一次性正则替换，避免 O(N × 文本长度) 的 split/join
+    let replaced = 0;
     markdown = markdown.replace(/\{\{IMG_(\d+)\}\}/g, (match, idx) => {
       const i = Number(idx);
       const p = actualPath.get(i) ?? pathByIndex.get(i);
-      return p === undefined ? match : p;
+      if (p === undefined) return match;
+      replaced++;
+      return p;
     });
+    // 占位符残留（理论上 content.js 已过滤非 http 图）：如实计数上报，
+    // 否则用户只会在 md 里看到一行字面量 {{IMG_3}}，不知道发生了什么。
+    const leftover = markdown.match(/\{\{IMG_\d+\}\}/g);
+    stats.unresolved = leftover ? leftover.length : 0;
+    if (stats.unresolved > 0) {
+      console.warn(`[wx-md] ${stats.unresolved} 个图片占位符没有对应文件，保留原样`);
+    }
+    if (replaced === 0 && items.length > 0) {
+      console.warn('[wx-md] md 里没有找到图片占位符，图片可能未被引用');
+    }
 
-    if (failed > 0) {
-      console.warn(`[wx-md] 本次共 ${failed} / ${items.length} 张图片下载失败`);
+    if (stats.failed > 0) {
+      console.warn(`[wx-md] 本次共 ${stats.failed} / ${items.length} 张图片下载失败`);
     }
-    if (blocked > 0) {
-      console.warn(`[wx-md] 已跳过 ${blocked} 张指向内网/本机地址的图片，仅保留在线链接`);
+    if (stats.blocked > 0) {
+      console.warn(`[wx-md] ${stats.blocked} 张图片未下载（内网地址或非微信图床），已保留在线链接`);
     }
+  } else if (imageMode === 'online') {
+    assertMarkdownSize(WXMD_DL.byteLength(markdown), 'online');
   }
 
   // Markdown 必须最后写：图片已经落盘，md 里的链接才会指向真实文件
   const mdTarget = limitPath(targetFile);
-  const mdRes = await downloadFile(toDataUrl(markdown), mdTarget);
+  const dataUrl = toMarkdownDataUrl(markdown, imageMode);
+  const mdRes = await WXMD_DL.downloadFile(dataUrl, mdTarget, DOWNLOAD_TIMEOUT);
   // 顺手把浏览器下载根目录记下来，设置页要展示给用户看
   await rememberDownloadRoot(mdRes, mdTarget);
+
+  return stats;
+}
+
+// ---------- 体积上限 ----------
+
+/** 把超限错误统一成一句能指导操作的话 */
+function assertMarkdownSize(bytes, mode) {
+  if (bytes <= MAX_MARKDOWN_BYTES) return;
+  const size = (bytes / 1024).toFixed(0);
+  const limit = (MAX_MARKDOWN_BYTES / 1024).toFixed(0);
+  const hint = mode === 'online'
+    ? '请改用「下载到本地」模式后再导出'   // 本地模式把长 URL 换成短相对路径，体积更小
+    : '请缩短「导出文件夹 / 图片命名」模板里的目录层级后再试';
+  throw new Error(`文章内容过大（约 ${size}KB，上限 ${limit}KB），${hint}`);
+}
+
+/**
+ * 估算替换占位符之后的 md 字节数。
+ * 不精确但足够用来「提前拦住明显超限的导出」：最终写入前还会再校验一次真实字节数。
+ */
+function estimateMarkdownBytes(markdown, pathByIndex) {
+  let bytes = WXMD_DL.byteLength(markdown);
+  markdown.replace(/\{\{IMG_(\d+)\}\}/g, (match, idx) => {
+    const p = pathByIndex.get(Number(idx));
+    if (typeof p === 'string' && p.length > match.length) bytes += p.length - match.length;
+    return match;
+  });
+  return bytes;
+}
+
+function toMarkdownDataUrl(markdown, mode) {
+  try {
+    return WXMD_DL.toDataUrl(markdown, MAX_MARKDOWN_BYTES);
+  } catch (err) {
+    // 预检已经拦过一次，走到这里说明估算偏低（例如 URL 里编码后的中文），
+    // 用真实字节数与对应模式的建议重报一次
+    if (err && err.wxmdTooLarge) assertMarkdownSize(err.wxmdTooLarge, mode);
+    throw err;
+  }
 }
 
 // ---------- 图片扩展名：从 URL 推断，零网络请求 ----------
@@ -401,67 +532,71 @@ function extFromUrl(url) {
 /**
  * 第二道校验（content.js 已经过滤过一次）。
  * 保留它的原因：EXPORT_ARTICLE 的 data 是外部传入的，不能假设它一定来过 content.js。
- * 内网 / 本机地址一律不下载，只回退成在线链接。
+ * 内网 / 本机地址一律不下载；默认还要求命中微信图床白名单——
+ * 只看 hostname 挡不住「域名解析到内网」的盲 SSRF，白名单才是真正的解法。
  */
-function isDownloadableImageUrl(u) {
+function isDownloadableImageUrl(u, allowExternalImages) {
   try {
     const parsed = new URL(u);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-    return !WXMD_isPrivateHost(parsed.hostname);
+    if (WXMD_isPrivateHost(parsed.hostname)) return false;
+    if (!allowExternalImages && !WXMD_isWechatImageHost(parsed.hostname)) return false;
+    return true;
   } catch (e) {
     return false;
   }
 }
 
-// ---------- Markdown 转 data URL ----------
-/**
- * encodeURIComponent 会把每个中文字符编码成 9 个字符（%E4%B8%AD），
- * 相对原文膨胀约 3 倍，很容易撞上 Chromium 约 2MB 的 URL 长度上限。
- * 改用 base64（只膨胀 1.33 倍）。
- */
-function toDataUrl(text) {
-  const bytes = new TextEncoder().encode(text);
-  if (bytes.length > MAX_MARKDOWN_BYTES) {
-    throw new Error(
-      `文章内容过大（${(bytes.length / 1024).toFixed(0)}KB），` +
-      '请改用「保留在线链接」模式后再导出'
-    );
-  }
-  let bin = '';
-  const CHUNK = 0x8000;
-  for (let i = 0; i < bytes.length; i += CHUNK) {
-    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
-  }
-  return 'data:text/markdown;charset=utf-8;base64,' + btoa(bin);
-}
-
 // ---------- 路径净化 ----------
 
-/** 收敛成安全的相对路径；过滤 ..、绝对路径、非法字符与超长片段 */
+/**
+ * 收敛成安全的相对路径；过滤 ..、绝对路径、非法字符、Windows 保留名与超长片段。
+ * 权威实现在 lib/naming.js（配置页预览也用同一份），这里只保留一层降级垫片。
+ */
 function safePath(p) {
+  if (typeof WXMD_NAMING !== 'undefined' && typeof WXMD_NAMING.sanitizePath === 'function') {
+    return WXMD_NAMING.sanitizePath(p);
+  }
   return String(p == null ? '' : p)
     .replace(/\\/g, '/')
     .split('/')
     .filter(seg => seg && seg !== '.' && seg !== '..')
-    .map(cleanSegment)
+    .map(seg => String(seg)
+      .replace(/[<>:"|?*\x00-\x1f]/g, '_')
+      .replace(/^[_\s]+/, '')
+      .slice(0, 80)
+      .replace(/[.\s]+$/, '')
+      .replace(/_+$/, ''))
     .filter(Boolean)
     .join('/');
 }
 
-/** Windows 保留设备名：CON / PRN / AUX / NUL / COM1-9 / LPT1-9（带扩展名同样非法） */
-const RESERVED_NAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i;
+/**
+ * 把「图片目录 + 文件名」压进 budget 字符内，返回压缩后的两段。
+ *
+ * 为什么不能只压整条路径：图片实际落盘路径和 md 里的引用是两处生成的，
+ * 只有「先压好 imgDir/filename、再用同一组值生成引用」才能保证两者一致。
+ * 压缩顺序：文件名主干 → 逐层去掉图片目录最外层 → 极端情况硬截文件名。
+ */
+function fitImageRel(imgDir, filename, budget) {
+  const segs = String(imgDir || '').split('/').filter(Boolean);
+  const dot = filename.lastIndexOf('.');
+  const ext = dot > 0 ? filename.slice(dot) : '';
+  let stem = dot > 0 ? filename.slice(0, dot) : filename;
 
-function cleanSegment(seg) {
-  let s = String(seg)
-    .replace(/[<>:"|?*\x00-\x1f]/g, '_')
-    .replace(/^[_\s]+/, '')
-    .slice(0, 80)
-    // 结尾清理必须在 slice 之后：截断本身可能把结尾落到点号或空格上，
-    // 而 Windows 不允许文件名以 "." 或 " " 结尾（会直接报 Invalid filename）
-    .replace(/[.\s]+$/, '')
-    .replace(/_+$/, '');
-  if (RESERVED_NAME.test(s)) s = '_' + s;
-  return s;
+  const build = () => (segs.length ? segs.join('/') + '/' : '') + stem + ext;
+
+  while (build().length > budget && stem.length > 8) {
+    stem = stem.slice(0, Math.max(8, stem.length - 4));
+  }
+  while (build().length > budget && segs.length > 1) {
+    segs.shift();
+  }
+  if (build().length > budget) {
+    const room = budget - (segs.length ? segs.join('/').length + 1 : 0) - ext.length;
+    stem = stem.slice(0, Math.max(4, room));
+  }
+  return { imgDir: segs.join('/'), filename: stem + ext };
 }
 
 /**
@@ -506,17 +641,7 @@ function limitPath(p, max = 200) {
   return build();
 }
 
-// ---------- 下载（等待真实终态） ----------
-
-/** 从绝对路径里取文件名，用于识别 Chrome 自动改名后的真实落盘名 */
-function baseName(p) {
-  return String(p || '').split(/[\\/]/).pop() || '';
-}
-
-/** 是否绝对路径（Windows 盘符 / UNC / POSIX） */
-function isAbsolutePath(p) {
-  return /^(?:[a-zA-Z]:[\\/]|\\\\|\/)/.test(String(p || ''));
-}
+// ---------- 下载根目录反推 ----------
 
 /**
  * Chrome 没有「读取默认下载目录」的 API。
@@ -526,7 +651,7 @@ function isAbsolutePath(p) {
 async function rememberDownloadRoot(res, relPath) {
   try {
     const full = String((res && res.fullPath) || '');
-    if (!isAbsolutePath(full)) return;
+    if (!WXMD_DL.isAbsolutePath(full)) return;
 
     const norm = p => String(p).replace(/\\/g, '/');
     const fullNorm = norm(full);
@@ -574,92 +699,4 @@ async function rememberDownloadRoot(res, relPath) {
   } catch (e) {
     // 纯展示，失败不影响导出
   }
-}
-
-function downloadFile(url, filename, timeoutMs = DOWNLOAD_TIMEOUT) {
-  return new Promise((resolve, reject) => {
-    chrome.downloads.download(
-      {
-        url,
-        filename,
-        // 不再覆盖同名文件：同名时自动加 (1)(2)，避免静默删除用户已有文件
-        conflictAction: 'uniquify',
-        saveAs: false
-      },
-      downloadId => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-          return;
-        }
-        if (typeof downloadId !== 'number') {
-          reject(new Error('下载任务创建失败'));
-          return;
-        }
-
-        let settled = false;
-        let timer = null;   // 必须先声明：finish 里要用，放后面会命中 TDZ
-        // uniquify 会把 "a.webp" 改成 "a (1).webp"，这里记录磁盘上真正的名字，
-        // 供调用方回写 markdown，否则 md 里的图片链接会指向不存在的文件。
-        let finalName = filename;
-        const finish = err => {
-          if (settled) return;
-          settled = true;
-          if (timer) clearTimeout(timer);
-          chrome.downloads.onChanged.removeListener(onChanged);
-          if (err) {
-            reject(err);
-            return;
-          }
-          // 常规情况 filename 增量已经给了绝对路径，直接返回（不额外产生异步开销）。
-          // 极少数拿不到的情况，用 search 补齐，保证 fullPath 一定是绝对路径。
-          if (isAbsolutePath(finalName)) {
-            resolve({ downloadId, filename: baseName(finalName), fullPath: finalName });
-            return;
-          }
-          chrome.downloads.search({ id: downloadId }, items => {
-            const real = (items && items[0] && items[0].filename) || '';
-            const path = real || finalName;
-            resolve({ downloadId, filename: baseName(path), fullPath: path });
-          });
-        };
-
-        const onChanged = delta => {
-          if (!delta || delta.id !== downloadId) return;
-          // filename 增量可能先于 state 到达，这里累积而不要提前 return
-          if (delta.filename && delta.filename.current) {
-            finalName = delta.filename.current;
-          }
-          if (!delta.state) return;
-          const state = delta.state.current;
-          if (state === 'complete') {
-            finish(null);
-          } else if (state === 'interrupted') {
-            finish(new Error((delta.error && delta.error.current) || '下载中断'));
-          }
-        };
-
-        timer = setTimeout(() => finish(new Error('下载超时')), timeoutMs);
-        chrome.downloads.onChanged.addListener(onChanged);
-      }
-    );
-  });
-}
-
-// ---------- 并发控制 ----------
-
-async function mapLimit(items, limit, fn) {
-  const size = Math.min(limit, items.length);
-  if (size <= 0) return;
-  let cursor = 0;
-  const workers = [];
-  for (let w = 0; w < size; w++) {
-    workers.push((async () => {
-      for (;;) {
-        const i = cursor++;
-        if (i >= items.length) return;
-        await fn(items[i], i);
-      }
-    })());
-  }
-  await Promise.all(workers);
 }

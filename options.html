@@ -88,6 +88,21 @@
     /* 短变量名不该被从中间折断（{{noteFolde│r}}） */
     .input-hint code.nobr, .ref-custom-note code.nobr { white-space: nowrap; word-break: keep-all; }
 
+    /* 复选框行（第三方图床开关）：只有一行文字 + 小方框，不占整张卡片 */
+    .check-row { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
+    .check-row input[type="checkbox"] {
+      width: 15px; height: 15px; margin: 2px 0 0; flex: 0 0 auto;
+      accent-color: var(--brand-green); cursor: pointer;
+    }
+    .check-text { display: block; }
+    .check-title { display: block; font-size: 12.5px; color: #374151; font-weight: 600; }
+    .check-desc { display: block; font-size: 11.5px; color: #6b7280; line-height: 1.65; margin-top: 3px; }
+    .check-desc code {
+      background: #fff; border: 1px solid #e5e7eb; border-radius: 4px;
+      padding: 0 4px; font-family: ui-monospace, monospace; font-size: 11px;
+      color: var(--brand-green-text);
+    }
+
     .mode-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
     .mode-card {
       border: 1px solid #e5e7eb; border-radius: 10px; padding: 14px; cursor: pointer;
@@ -645,6 +660,20 @@
               只改变 Markdown 里链接的写法，<b>不影响图片实际保存位置</b>；上方「Markdown 中写作」与下方路径预览会同步显示真实结果。
             </div>
           </div>
+        </div>
+
+        <div class="config-block" id="externalImageBlock">
+          <label class="check-row">
+            <input type="checkbox" id="allowExternalImages">
+            <span class="check-text">
+              <span class="check-title">下载第三方图床的图片</span>
+              <span class="check-desc">
+                默认只下载微信图床（<code>qpic.cn</code> <code>qlogo.cn</code> <code>wx.qq.com</code> 等），
+                文章里指向其他站点的图片保留在线链接。图片地址完全由文章作者控制，
+                白名单是挡住「域名指向内网」这类探测的唯一可靠办法；确认图片源可信时再打开。
+              </span>
+            </span>
+          </label>
         </div>
 
         <div class="preview-box">

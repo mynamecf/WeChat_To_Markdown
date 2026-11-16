@@ -16,10 +16,27 @@
 
   const POS_KEY = 'wxMdFloatPos';
   const DRAG_THRESHOLD = 5;
-  // 导出等待上限（ms）。浮窗拿不到图片数量，用固定值：
-  // 正常文章几秒就完，5 分钟足够覆盖慢网络下的多图长文；
-  // 只用于放开按钮，不会中断后台已经发出的下载。
-  const EXPORT_WATCHDOG_MS = 300000;
+  // 导出「静默」上限（ms）：多久没有进度就判定后台失联。
+  // 不是总耗时上限——后台每完成一张图会发 EXPORT_PROGRESS，收到就重新计时。
+  // 正常文章几秒一张，90s 没有动静基本就是后台被回收了。
+  // 只用于放开按钮并如实提示，不会中断后台已经发出的下载。
+  const EXPORT_WATCHDOG_MS = 90000;
+
+  // ---------- 只在文章页挂载 ----------
+  // content_scripts 的 matches 是 https://mp.weixin.qq.com/*，这个域名下还有首页、
+  // 视频播放页（/mp/readtemplate?t=pages/video_player_tmpl）、搜索结果、话题页……
+  // 它们都没有正文，浮窗固定在那儿只能点出「未找到文章正文」，不如不出现。
+  const IS_ARTICLE_PAGE = (function () {
+    // #activity-name 是文章壳里的标题节点，出现得比正文早，一并用来认文章页
+    if (document.querySelector('#js_content, .rich_media_content, #js_image_content, #activity-name')) {
+      return true;
+    }
+    // 正文可能还没插进 DOM（document_idle 可以早于异步渲染），按路径兜底
+    const p = location.pathname;
+    return p === '/s' || p === '/s/'
+      || p.indexOf('/s/') === 0
+      || p.indexOf('/mp/appmsg/show') === 0;
+  })();
 
   // ---------- 挂载 DOM ----------
 
@@ -27,6 +44,26 @@
   host.id = 'wx-md-floating-host';
   host.style.visibility = 'hidden'; // 读回位置前先别闪一下
   document.documentElement.appendChild(host);
+
+  if (!IS_ARTICLE_PAGE) {
+    host.remove();
+    // 仍然要注册消息监听：popup 的「固定」按钮会发 SHOW_FLOATING，
+    // 这个页面没有监听器时 sendMessage 直接 reject，弹窗只能静默吞掉，
+    // 用户看到的是「提示成功、页面上什么也没有」。
+    // 这里明确回一条 ok:false，弹窗据此撤回 pinned 并给出真实原因。
+    chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+      if (!msg) return;
+      if (msg.type === 'SHOW_FLOATING' || msg.type === 'TOGGLE_FLOATING') {
+        sendResponse({ ok: false, error: '当前页面不是文章正文页，浮窗只在文章页显示' });
+        return true;
+      }
+      if (msg.type === 'HIDE_FLOATING') {
+        sendResponse({ ok: true });
+        return true;
+      }
+    });
+    return;
+  }
 
   // closed：isolated world 只隔离 JS 环境，DOM 树是和页面共享的。
   // open 模式下页面脚本可以 host.shadowRoot.getElementById('wxMdExport').click()，
@@ -609,7 +646,9 @@
   let dragAbort = null;
   let rafId = 0;
   let pendingPoint = null;
-  let ballMoved = false;
+  let dragMoved = false;    // 本次拖拽真的移动过
+  let dragFromBall = false; // 起点是圆球（true）还是面板标题（false）
+  let ballMoved = false;    // 圆球刚被拖过 → 吞掉紧随其后的 click（否则松手就展开/收起）
 
   function flushMove() {
     rafId = 0;
@@ -622,12 +661,13 @@
 
   function onMove(e) {
     if (!dragCtx) return;
-    if (!ballMoved) {
+    if (!dragMoved) {
       const dx = Math.abs(e.clientX - dragCtx.startX);
       const dy = Math.abs(e.clientY - dragCtx.startY);
       if (dx < DRAG_THRESHOLD && dy < DRAG_THRESHOLD) return;
-      ballMoved = true;
-      ball.classList.add('dragging');
+      dragMoved = true;
+      // 只有拖圆球时才让圆球进入「拖拽中」样式；拖面板标题也去缩放圆球会很怪
+      if (dragFromBall) ball.classList.add('dragging');
     }
     pendingPoint = { x: e.clientX, y: e.clientY };
     if (rafId) return;
@@ -644,9 +684,13 @@
       dragAbort.abort();
       dragAbort = null;
     }
-    const moved = ballMoved;
+    const moved = dragMoved;
+    // 拖过圆球才需要吞掉 click；拖的是面板标题时别把下一次点球当成「拖拽收尾」
+    ballMoved = dragFromBall && moved;
     dragCtx = null;
     pendingPoint = null;
+    dragMoved = false;
+    dragFromBall = false;
     ball.classList.remove('dragging');
 
     if (shouldSave && moved) {
@@ -655,7 +699,7 @@
     }
   }
 
-  function startDrag(e) {
+  function startDrag(e, fromBall) {
     if (e.button !== 0) return;
     // 先清掉上一次可能残留的拖拽（mouseup 丢失时的兜底）
     if (dragCtx) endDrag(false);
@@ -670,6 +714,8 @@
       h: rect.height || 52
     };
     pendingPoint = { x: e.clientX, y: e.clientY };
+    dragMoved = false;
+    dragFromBall = !!fromBall;
     ballMoved = false;
 
     dragAbort = new AbortController();
@@ -682,7 +728,7 @@
 
   ball.addEventListener('mousedown', e => {
     e.preventDefault();
-    startDrag(e);
+    startDrag(e, true);
   });
 
   ball.addEventListener('click', e => {
@@ -792,16 +838,31 @@
     exportBtn.disabled = true;
     setStatus('正在提取文章...');
 
-    // 后台被浏览器强杀、或卡在某个 Promise 上不返回时，sendMessage 可能一直悬空，
-    // 按钮会永久 disabled。浮窗拿不到图片数量，用一个固定的宽松上限兜底。
+    // 看门狗是「多久没动静」而不是「总共最多等多久」：
+    // 后台每完成一张图会发 EXPORT_PROGRESS，收到就续期。
+    // 固定 5 分钟对 60 张以上的长文会踩线（并发 4、单张最多 20s ⇒ 最坏 300s+），
+    // 那时后台还在正常下载，界面却已经报「超时」。
     let guardTimer = 0;
+    let fireTimeout = null;
     const guard = new Promise((_, reject) => {
-      guardTimer = setTimeout(() => {
+      fireTimeout = () => {
         const e = new Error('后台长时间无响应，请先检查下载目录再重试');
         e.wxmdTimeout = true;
         reject(e);
-      }, EXPORT_WATCHDOG_MS);
+      };
     });
+    const armGuard = ms => {
+      clearTimeout(guardTimer);
+      guardTimer = setTimeout(() => { if (fireTimeout) fireTimeout(); }, ms);
+    };
+    armGuard(EXPORT_WATCHDOG_MS);
+
+    // 进度消息由后台在导出期间广播，收到就续期
+    const onProgress = msg => {
+      if (!msg || msg.type !== 'EXPORT_PROGRESS') return;
+      armGuard(EXPORT_WATCHDOG_MS);
+    };
+    chrome.runtime.onMessage.addListener(onProgress);
 
     try {
       const resp = await Promise.race([
@@ -812,17 +873,19 @@
         guard
       ]);
       if (resp && resp.success) {
-        setStatus('导出成功！', 'success');
+        setStatus(exportSuccessText(resp.stats), 'success');
       } else {
         setStatus('失败：' + ((resp && resp.error) || '未知错误'), 'error');
       }
     } catch (err) {
       setStatus(
-        err.wxmdTimeout ? '超时：' + err.message : '失败：' + (err.message || '请刷新页面后重试'),
+        err && err.wxmdTimeout ? '超时：' + err.message
+          : '失败：' + ((err && err.message) || '请刷新页面后重试'),
         'error'
       );
     } finally {
       clearTimeout(guardTimer);
+      try { chrome.runtime.onMessage.removeListener(onProgress); } catch (e) {}
       exportBtn.disabled = false;
     }
   });
@@ -830,6 +893,18 @@
   optionsBtn.addEventListener('click', () => {
     chrome.runtime.sendMessage({ type: 'OPEN_OPTIONS' }).catch(() => {});
   });
+
+  /** 成功文案带上「有几张图没下来」，否则用户只会在下次打开笔记时看到裂图 */
+  function exportSuccessText(stats) {
+    const s = stats || {};
+    const notes = [];
+    if (s.failed) notes.push(s.failed + ' 张图片下载失败');
+    if (s.blocked) notes.push(s.blocked + ' 张图片未下载（非微信图床或内网地址）');
+    if (s.unresolved) notes.push(s.unresolved + ' 处图片链接未能替换');
+    return notes.length
+      ? '导出成功，但' + notes.join('，') + '；这些位置保留为在线链接'
+      : '导出成功！';
+  }
 
   chrome.runtime.onMessage.addListener(msg => {
     if (!msg) return;

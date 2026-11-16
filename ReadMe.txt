@@ -285,3 +285,70 @@ AM.快捷键说明改用原生 tooltip（v16.22.0）：
 2.保留的：文案仍按平台生成（503-508 行）Windows「Ctrl S 仅在浮窗展开时生效」/ macOS「⌘ S 仅在浮窗展开时生效」；徽标 kbd 仍显示对应按键。
 3.已知代价：原生 title 只在悬停时出现，键盘 focus 不会弹（自绘版有 :focus-visible 支持）；另外挂的是整颗按钮，鼠标停在按钮任意位置都会出，和归档方式按钮的行为一致。
 4.验证：浮窗夹具读到 btn.title 有值、::after 的 computed content 为 "none"（确认自绘气泡已彻底移除）；mac 模式夹具读到「⌘ S 仅在浮窗展开时生效」；状态提示时序不变；node --check 全通过，--pack-extension 通过（产物已删）。原生 tooltip 由浏览器 UI 绘制，截图抓不到，只能靠属性断言。
+AN.图片消息（图文 / 小绿书）适配：补全图片 + 清 UI 噪音（v16.23.0）：
+1.问题：https://mp.weixin.qq.com/s/z4ujxrVatZ7kK_iAb6Ev5Q 这类「图片消息」导出后 0 张图，尾部还多出「原文 xxx」「山西,11月4日,」两行。原因是微信两套模板：普通图文所有内容都在 #js_content 内；图片消息的 #js_content 里只有 #js_image_content（<h1> 标题 + <p id="js_image_desc"> 正文），真图全在 #js_content 之外的轮播区 #img_list 里。content.js 的 ARTICLE_SELECTOR='#js_content' 扫不到任何 <img>，于是 images=0；同时 <h1> 与 YAML 标题重复、#js_origin_source / .rich_media_meta_area_extra 属于 UI 噪音。
+2.改法：新增 lib/imagepost.js（175 行，var WXMD_IMAGEPOST），入口 prepare(clone, pageRoot, log)：
+   - 判定：pageRoot.querySelector('#js_image_content, #img_list')（25 行），不存在立即 return —— 普通图文零影响；
+   - 取图：collectUrls（83 行）按 #img_list .swiper_item 的 DOM 顺序取 data-src（原图），没有才退回内层 img[src]（那是 tp=webp&watermark=1 的展示副本）；decodeUrl（50 行）还原 &amp;、补全 // 协议相对；keyOf 按 path 去重（同一张图常带不同 query）；
+   - 插图：把图按顺序塞进一个 div，插到 #js_image_desc 之后（文字在前、图在后；无描述段时挂在 #js_image_content 后），插进去就是普通 <img src>，后续 data-img-idx → {{IMG_n}} → 并发下载 → 命名模板全部复用原链路，下载侧一行未改；
+   - 清理：NOISE_SEL（38 行）删 h1.rich_media_title、#js_origin_source、.rich_media_meta_area_extra、#js_ip_wording_wrp、#publish_time、.rich_media_meta_list 等；删前判一下里面有没有 #js_image_desc，避免旧模板把正文塞在 meta 容器里被误删；
+   - 兜底告警：readAnnouncedTotal（68 行）读轮播角标「共 N 张」，实际取到的少于它时 console.warn，防止微信将来改成只渲染可视区时静默少图。
+3.接线：background.js 128 行、popup.js 21 行注入列表各加 'lib/imagepost.js'；content.js 187-188 行在附件处理之后、图片统计之前调用（图片统计必须在其后，否则补进来的图不会被登记下载）。
+4.实测（该文）：改前 mdLen 1230 / 0 张图 / 尾部两行噪音；改后 mdLen 1404 / 15 张图，正文全在图片之前，噪音 0；15 条地址均为 data-src 原图（wx_fmt=png，无 tp=webp / watermark=1），path 全不重复，实测 curl 三张（第 1/8/15 张）均 200 image/png（50 万 / 6.8 万 / 13.7 万字节）。
+5.回归：live / live1~6 七篇 + q887 与改前逐字一致（判定不命中即走原路径）；新增夹具 build_imagepost.js 7 个场景全过：15 张 data-src + 全部噪音（噪音残留 0、结构为「文字,图×15」）、只有 img[src] 含 // 协议相对、同图不同 query 去重、data-src 与 img 混排保序、无描述段挂容器后、普通图文零影响（h1/meta/origin_source 三个节点必须留着）、角标 15 实际 8 触发告警。
+6.node --check 八个文件 + --pack-extension 打包通过（产物已删）。
+AO.全量排查后的修复：首图取错 / 裂图 / 浮窗越界挂载 / 判定绑死 id（v16.24.0）：
+1.图片消息首图取的是占位副本（lib/imagepost.js）：轮播第 1 项是「撑开尺寸的空壳」，没有 data-src、只有一张 img[src]，path 与真图第 1 张相同。旧实现逐项「没有 data-src 就退回 img[src]」，第 1 张因此取副本（带 usePicPrefetch），只是靠后面的按 path 去重才和真图合并，看上去正常。
+   改法：collectUrls（113 行）改两遍扫描——先收集全部 data-src 的 path 白名单（117-121 行），第二遍没有 data-src 的项只有在「img[src] 的 path 不在白名单」时才计入（136 行）；空壳容器整项跳过（PLACEHOLDER_SEL，52 行）。实测该文首图从 `…&usePicPrefetch=1&tp=webp` 副本变成 `4ZXa4EZoNftwCd0tvoZGZMZia…` 原图，15 条全部 wx_fmt=png 且无 tp=webp / watermark=1。
+2.图片下载失败 → md 里写的是本地不存在的路径（background.js 304 行）：旧逻辑失败项不进 actualPath，替换时回落到 pathByIndex（按命名模板预算的路径），指向一个没落盘的文件，就是裂图。改为与「内网地址」分支一致，失败时 actualPath.set(i, item.url) 回写原始 URL，图还能点开。
+3.浮窗在非文章页也挂载（floating.js 24-51 行）：content_scripts 的 matches 是 https://mp.weixin.qq.com/*，域名下还有首页、视频播放页、历史消息页等，固定后点导出必报「未找到文章正文」。新增 IS_ARTICLE_PAGE：先看 DOM（#js_content / .rich_media_content / #js_image_content / #activity-name），再按路径兜底（/s、/s/xxx、/mp/appmsg/show），不命中就 host.remove() 并 return。
+4.图片消息判定绑死 id（lib/imagepost.js 32-45 行）：DETECT_SEL 原来是 '#js_image_content, #img_list'，只有 class 的同类模板命中不了、退回 0 图。改成 id + class 都认（#js_image_content / .image_content / #img_list / .img_swiper_area / .img_swiper_content），ITEM_SEL 补 .share_media_swiper_content .swiper_item。
+   为防止宽判定误伤，噪音清理前加 looksLikePost 闸门（218 行）：没有取到图、clone 里也没有 #js_image_content / #js_image_desc 时，一个节点都不删。
+5.正文根节点硬依赖 #js_content（content.js 20 行、169-176 行）：换成候选列表依次命中 #js_content → .rich_media_content → #js_image_content，第三项专门兜「图片消息不套 #js_content」的模板；都不命中才报「未找到文章正文」，fallback 命中时 LOG 记录用的哪个选择器。
+6.顺带（小毛病）：
+   - 拖面板标题会给圆球加 .dragging 且吞掉下一次点球（floating.js 633-690 行）：拆成 dragMoved（是否移动）/ dragFromBall（起点）、ballMoved 只在「从圆球开始且真的移动」时才置 true，.dragging 也只加给圆球。
+   - 图片消息模板里首图若已在正文中，轮播补一遍会重复：插入前用 clone 里已有 img 的 path 建集合，命中就跳过（177-196 行）。
+   - 配置页平台判断与浮窗不一致（options.js 77-81 行）：统一为 UA-CH → navigator.platform → userAgent。
+   - 公网 IPv6 图床被误判内网（lib/defaults.js 80-84 行、content.js 86 行兜底副本）：不含点但含冒号的 IPv6 地址不再当内网主机名。
+   - 配置页路径预览固定拼 .png（options.js 267/390 行）与实际扩展名可能不同，属示例展示，未改。
+7.验证：
+   - 夹具 build_imagepost.js 扩到 9 个场景全过，新增「空壳项不占位（取原图、不重复）」「假命中 .image_content 不误删」。
+   - 新增 build_root.js：.rich_media_content 兜底、只有 #js_image_content 的图片消息、非文章页明确报错，8 项断言全过。
+   - 新增 build_float_guard.js：首页 / 视频播放页 / 历史消息页不挂，文章页 / 图片消息 / 正文未渲染但路径是 /s 时挂，7 个场景全过。
+   - 新增 build_float_drag.js：拖标题不再给圆球加 dragging、也不再吞下一次点球；拖圆球仍吞 click、松手移除样式，4 项全过。
+   - 回归：live / live1~6 + q887 与改前逐字一致（字符数一分不差）；z4 仍 15 图 / 1404 字符，首图已换原图。
+   - 浮窗状态提示与快捷键夹具（Windows / mac 两种）输出不变。
+8.node --check 八个文件 + --pack-extension 打包通过（产物已删）。
+AP.表格识别修复：单元格里的块级容器会把表格拆散（v16.25.0）：
+1.症状：https://mp.weixin.qq.com/s?__biz=MzA4OTY3ODQzNw==&mid=2448504562&idx=1&sn=54186a20e3c4ffa77120473e1b5969fa 「一、官网这5句宣传，句句都得翻译成人话」下面那张 4 列 × 5 行的表格导出后不是表格，而是一堆带「|」的普通段落，每个单元格的文字前后还各空一行。
+2.根因：表格本身是标准结构 <table><thead><tr><th><section><span>…，GFM 规则认得出；坏在 wechatSection 规则——单元格里的 <section> 是「只有行内内容的叶子」，规则给它前后补了空行，单元格内容于是变成「\n\n卖点\n\n」。GFM 表格按「一行一组 | 分隔符」识别，单元格里一出现换行，这一行就从中间断开，整张表退化成段落。
+3.修法一（结构层）：新增 normalizeTableCells()，排在嵌套列表之后（结构归一第 5 步）。单元格里全是块级容器时，把容器内容摊平进单元格：块与块之间插一个 <br>，行内标签（span/strong/a）原样保留；含图片 / 代码 / 嵌套表格 / 列表的单元格整格跳过，交给规则层压平，避免丢内容或撑坏列宽。
+4.修法二（规则层）：接管 gfm 的 tableCell 规则（wxmdTableCell）——内容里的换行统一压成空格，裸「|」转义成「\|」（不转义会被当列分隔符，凭空多一列）；首列判断改用 previousElementSibling 而不是 childNodes 下标，单元格之间夹一个空白文本节点也不会丢掉行首竖线。
+5.修法三：新增 wxmdCellBreak，单元格内的 <br> 写成字面 <br>——Turndown 默认输出「两空格 + 换行」，同样会截断表格行。wechatSection / wechatImage 在 th、td 内不再补空行，兜住被跳过的复杂单元格。
+6.顺序注意：normalizeTableCells 在 Turndown 之前执行；常量 CELL_BLOCK_RE 必须定义在调用点之前，否则 const 的 TDZ 会让整个导出直接抛错。
+7.实测（目标文章全篇）：mdLen 3601 / 16 图 / 3 代码块；表格输出为
+   | 卖点 | 官网口径 | 人话翻译 | 适合 |
+   | --- | --- | --- | --- |
+   | 永久免费 | 免费档 5GB 空间、不限流量 | 长期不缴费也能用 | 试验站、短期项目 |
+   4 行数据齐全，表格前后的空行正常，图片与代码块不受影响。
+8.回归：live / live1~6 / q887 七篇与改前逐字一致（只有 exported 时间戳不同）；z4 仍 15 图 / 1404 字符；live 的 19 个代码块、q887 的 29 张图均不变。
+9.夹具（6 个场景）：section 包裹的基础表格 ✓、单元格两段 → <br> ✓、单元格含图片（单行 {{IMG_n}}）✓、单元格含列表（压成「- 甲 - 乙」）✓、单元格含竖线 → \| ✓、无表头表格仍保留 HTML ✓。
+10.已知限制：colspan / rowspan 没有对应的 GFM 语法，带合并单元格的表格会少列（文字不丢）；没有表头的表格仍按原 HTML 保留（旧行为）；单元格里的列表会被压成一行。
+11.node --check content.js + --pack-extension 打包通过（产物已删）。
+AQ.代码审查整改（16 项）与模块拆分（v16.26.0）：
+1.段落（P1）：用 <div> 直装正文段落的模板（转载模板、部分第三方编辑器）整篇粘成一段。removeEmptyInline 规则原先对 div 只 return content，Turndown 给块级节点补的间距被吞掉，且不报错。改为按块级处理：补空行；表格单元格内保持单行、列表项内不补（否则紧凑列表会被撑散）。
+2.安全（P1）：图片域名白名单。只看 hostname 挡不住「域名 A 记录指向内网」的盲 SSRF，扩展里没有 DNS 解析能力，所以默认只下载微信图床（qpic.cn / qlogo.cn / wx.qq.com / gtimg.cn / gtimg.com，后缀匹配含子域名），其余图片保留在线链接。配置页新增「下载第三方图床的图片」开关，默认关闭。
+3.并发（P1）：导出锁（按文章 URL，10 分钟自愈）。浮窗与弹窗可以同时触发同一篇导出，两套下载各 4 路并发、conflictAction 互相改名，结果是图片目录堆副本、md 指向不确定的那一份。不同文章仍允许同时导出。
+4.计时（P1）：看门狗从「总共最多等多久」改成「多久没进度」。后台每完成一张图广播 EXPORT_PROGRESS（节流 500ms），popup / 浮窗收到就续期。原公式 60s + 图片数×1.5s 在 40 张图时会于 120s 提前报超时，而真实最坏耗时 200s。
+5.交互（P1）：非文章页点「固定」的假成功。floating.js 原先在注册 onMessage 之前就 return，popup 的 sendMessage 必然 reject 且被 .catch(() => {}) 吞掉；用户看到「成功」，页面上什么也没有，而 pinned 已落库，下次打开任意文章页浮窗会自己冒出来。现在 popup 先探活（#js_content / .rich_media_content / #js_image_content / #activity-name），浮窗在非文章页也会回一条 ok:false，弹窗据此撤回 pinned 并给出真实原因。
+6.配置（P1）：保存时校验空模板。onlineFilename / downloadFolder / imageFilename / sharedFilename / sharedImageFilename 留空会把所有文章塌到 article/article.md（Chrome 再依次改名 article (1).md），图片也全混在一个目录，且不报错。
+7.体积（P2）：1.4MB 预检从「所有图片下载完之后」提前到下载之前（按替换后的字节数估算），不再出现「等了几分钟、提示超限、磁盘上多一堆没人引用的图片」。提示按模式区分：在线模式建议改「下载到本地」，本地模式建议缩短目录模板。
+8.空值（P2）：markdown 只有空白时直接报错，不再生成一个只有 YAML frontmatter 的文件并显示成功。
+9.反馈（P2）：图片下载失败 / 被拦截 / 占位符残留三个计数随 sendResponse 回传，界面提示「导出成功，但 3 张图片下载失败；这些位置保留为在线链接」。原先只有 console.warn，用户下次打开笔记看到裂图才知道。
+10.一致性（P2）：新增 fitImageRel——图片目录与文件名先按剩余预算压好（总长 ≤200），再用同一组 imgDir / filename 生成 md 引用；文章目录本身也先 limitPath 到 160。原先只裁下载路径、引用仍用完整目录，目录+长标题时必然裂图。
+11.代码块（P2）：收尾整理跳过围栏代码块。整篇的 \n{3,} 压缩与「只含空格的行清空」会把代码里的连续空行、Makefile 的 tab 空行改掉；现在只处理围栏之外的文本。已知限制：代码块内部本身含一行 ``` 时会被当分隔符提前切断（极罕见）。
+12.表格（P2）：单元格跳过清单补 svg / math。纯图标单元格原先会被摊平，flattenCellInto 对 svg 走 cloneNode(false) 只留空壳，图标内容直接丢。
+13.规整：新增 lib/blocks.js（引用块 + 嵌套列表）、lib/tables.js（单元格摊平 + wxmdTableCell / wxmdCellBreak 两条规则）、lib/injectlist.js（注入清单与 pickArticleData 单一来源）、lib/download.js（downloadFile / mapLimit / toDataUrl / byteLength）。content.js 649 → 532 行，background.js 只留调度、路径与统计。
+14.规整：路径清洗统一到 lib/naming.js（sanitizeSegment / sanitizePath，含 Windows 保留名、80 字符段长、过滤 . 与 ..），background 的 cleanSegment 删除，预览与落盘不再有两套规则；sanitizePath 不再做 100 字符整体截断（会把最后一级目录截丢），总长交给 limitPath。content.js 版本号改为从 chrome.runtime.getManifest() 读取；turndown / turndown-plugin-gfm 头部补来源与版本注释。
+15.测试：新增 package.json 与 test/（node --test + jsdom，31 个用例）。直接在 jsdom 里注入真实的 lib 与 content.js，不是复制一套逻辑。覆盖：div 段落 4 例、三连空行、表格 5 例（section 单元格 / 竖线转义 / 多段 <br> / svg / 图片）、代码块空行、引用块、嵌套列表、图床白名单 3 例、data-src 优先级、图片消息补图；另有命名与安全判断 9 例。npm test 全绿。
+16.回归：live / live1~6 / q887 八篇与改前逐字一致（jsdom 新旧同环境对照）；表格文章 3558 字符 / 16 图 / GFM 表格正常；z4 仍 15 图。node --check 全部通过，--pack-extension 打包通过（产物已删）。
