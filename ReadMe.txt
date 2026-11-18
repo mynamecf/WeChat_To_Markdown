@@ -352,3 +352,24 @@ AQ.代码审查整改（16 项）与模块拆分（v16.26.0）：
 14.规整：路径清洗统一到 lib/naming.js（sanitizeSegment / sanitizePath，含 Windows 保留名、80 字符段长、过滤 . 与 ..），background 的 cleanSegment 删除，预览与落盘不再有两套规则；sanitizePath 不再做 100 字符整体截断（会把最后一级目录截丢），总长交给 limitPath。content.js 版本号改为从 chrome.runtime.getManifest() 读取；turndown / turndown-plugin-gfm 头部补来源与版本注释。
 15.测试：新增 package.json 与 test/（node --test + jsdom，31 个用例）。直接在 jsdom 里注入真实的 lib 与 content.js，不是复制一套逻辑。覆盖：div 段落 4 例、三连空行、表格 5 例（section 单元格 / 竖线转义 / 多段 <br> / svg / 图片）、代码块空行、引用块、嵌套列表、图床白名单 3 例、data-src 优先级、图片消息补图；另有命名与安全判断 9 例。npm test 全绿。
 16.回归：live / live1~6 / q887 八篇与改前逐字一致（jsdom 新旧同环境对照）；表格文章 3558 字符 / 16 图 / GFM 表格正常；z4 仍 15 图。node --check 全部通过，--pack-extension 打包通过（产物已删）。
+AR.视频号卡片识别与定位（v16.27.0）：
+1.症状：https://mp.weixin.qq.com/s/hX_WmYpYDJAo3y5C-zQAAg 导出后，正文里那个视频（新华社「40秒热门短视频」）整块消失。2229 字符 / 6 图，图注「▲2月10日，贵州省委政法委…」后面直接接下一段正文，连「视频」两个字都没有。
+2.根因一（代码）：lib/attachment.js 的 MEDIA_SEL 只有 mp-common-videosnippet / mp-common-videochannels，没有 mp-common-videosnap；PLAYER_WRAP_SEL 里只有 .video_iframe，而这类卡片的 class token 是 videosnap_video_iframe（CSS class 选择器按整 token 匹配，多一个前缀就不命中），.channels_iframe / .channels_iframe_wrp 也都不在清单。三个选择器全部落空 → 节点原样交给 Turndown → 未知标签、无文本 → 输出空字符串。
+3.根因二（能力）：videosnap 是「视频号」卡片，和公众号自营视频（videosnippet → wxv_xxx → readtemplate 播放页）不是一回事。实测：组件 shadowRoot 里只有卡片 UI（I.weui-play-btn_primary、昵称「新华社」、认证标、2704 赞），整页 <video> 元素 0 个；data-url 看着像直链（findermp.video.qq.com/.../stodownload），实际返回 540×720 封面 JPEG（27KB，Content-Range 全长就是 27060），换桌面 UA / 微信 UA / 加 Referer 三次都返回同一张 jpg；页面里 channels.weixin.qq.com、weixin://、shareUrl、mpvideo.qpic.cn 全部 0 命中，只有 export_id（视频号内部 objectId）和 CGI 名单里的 mp/appmsg_video_snap。真实流要带微信登录态调接口且分片加密，扩展拿不到。
+4.修法：MEDIA_SEL 补 mp-common-videosnap / videoplayer / videobox；PLAYER_WRAP_SEL 与 PLAYER_CHROME_SEL 补 .channels_iframe_wrp / .channels_iframe / .videosnap_video_iframe；readAttachment 在开头先向下找 SNAP_SEL 本体，命中就走 readVideosnap——不给假的直链，只指回原文，label 写成「视频（视频号 · 新华社）」，data-type=live 时写「直播（视频号直播 · 昵称）」。
+5.定位为什么不用 #hash / #:~:text=：微信页面在加载后约 300ms 内 replaceState 把 hash 抹掉。实测（无头 Chrome + 有界面 Chrome 各一轮）：Page.navigate 到带 #:~:text= 的地址，400ms 时 location.href 已经不含 fragment，4s 后 scrollY 仍是 0，videoTop 还是 2695。#js_content 这种普通锚点只滚到正文顶部（scrollY 117），同样没用。所以放弃浏览器自带机制。
+6.定位改用 query：?wxmd_video=N。实测参数一直保留（300ms / 1200ms / 4000ms 三次采样都在），文章正常加载。N 是「视频号卡片」在正文里的序号，按 DOM 顺序、不分 video / live 一起数，在嵌套去重之后统一赋（早赋会因去重错位）。
+7.扩展侧：floating.js 新增 scrollToVideoFromUrl()，跑在文章页判断之后。读 wxmd_video，按同一个选择器取第 N 个卡片，滚到「卡片顶部 - max(72px, 视口 10%)」。分 0/600/1500/3000ms 四轮校正（图片懒加载会边滚边撑高），已在位置附近（±40px）就不动，用户一滚滚轮 / 触摸就彻底交出控制权。
+8.实测：?wxmd_video=1 打开文章，滚到 2605，卡片 top=90 / bottom=677，视口 900，完整可见；后三轮都是 already（没有抖动）。
+9.兼容：没装扩展时这个参数完全无害，微信照常打开文章，只是不定位；appendQuery 会把参数插在 #wechat_redirect 之前，带 __biz 的长链也照常可用。手机微信内置浏览器同样只是不跳。
+10.实测输出（目标文章）：2359 字符 / 6 图，视频行是 [视频（视频号 · 新华社）](https://mp.weixin.qq.com/s/hX_WmYpYDJAo3y5C-zQAAg?wxmd_video=1)。
+11.回归：live / live1~6 / q887 八篇与改动前逐字一致；z4 仍 15 图 / 1367 字符；表格文章 3558 字符 / 16 图 / 6 张表。自营视频（videosnippet）那条老路径不动，仍给 view_player_tmpl 可播放页。
+12.测试：新增 6 个夹具（单个卡片、多个顺序编号、live、带 #wechat_redirect 的参数拼接、卡片 UI 文案不漏、自营视频不带参数），npm test 37 项全绿。
+13.node --check 全部通过，npm run pack 打包通过（产物已删）。
+AS.定位等待放长 + 失效可诊断（v16.28.0）：
+1.症状：用户打开带 ?wxmd_video=1 的文章链接后，页面没有滚到视频位置，也没有任何提示。
+2.根因（不是代码）：Chrome 里装的仍是 1.16.26.0。未打包扩展改完文件不会自动生效——实测：只改 floating.js 的滚动偏移（72 → 300），不点重载，新开标签页仍然读出旧的 72px 偏移，说明内容脚本读的是加载时缓存的那份。Secure Preferences 里 service_worker_registration_info.version = 1.16.26.0 也能对上。处理办法：chrome://extensions 里点该扩展的「重新加载」，版本号应变为 1.16.28.0。
+3.等待策略放长：原来只在 0/600/1500/3000ms 四轮里找卡片，弱网或冷启动时卡片 3 秒后才挂进 DOM 就会彻底放弃。改为 3 秒内照旧做四轮漂移校正；3 秒没定位到就继续在 5000 / 8000 / 12000ms 补找，但已经定位成功过就不再动（避免用户读着读着被拽回去）。
+4.交互判定补 pointerdown：拖滚动条、点选文字不触发 wheel / touchmove，以前会被当成「用户没动」，现在同样交出控制权。
+5.诊断：12.5s 仍未定位到，控制台留一行 [wx-md] 告警，区分「页面上压根没有视频卡片元素」和「有 N 个但序号超范围」，不用再靠猜。
+6.验证：干净配置里用 CDP（Extensions.loadUnpacked）装载本扩展后打开该链接，scrollY 0 → 2269 → 2614，卡片 top 2695、视口 900，稳定不抖；改动前后同一路径逐字节对比无差异。

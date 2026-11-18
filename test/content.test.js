@@ -160,3 +160,65 @@ test('图片消息：正文外的轮播图补到描述文字之后', async () =>
   assert.equal(images.length, 2, '空壳项不该被当正文图');
   assert.ok(body.indexOf('一段描述文字') < body.indexOf('{{IMG_0}}'), '图片必须在文字之后');
 });
+
+// ---------- 视频号卡片（mp-common-videosnap） ----------
+// 这类卡片没有 <video>、没有 web 播放页：data-url 实测返回的是封面 JPEG，
+// 页面里也没有 channels.weixin.qq.com / weixin:// 之类的可分享地址。
+// 所以只能指回原文，并用 ?wxmd_video=N 让扩展在页面就绪后滚过去。
+
+// 注意别用「默认属性 + 再拼一份覆盖」的写法：HTML 里同名属性取第一个，
+// data-nickname 拼两次永远是新华社，测试会假绿。
+const snapCard = ({ nick = '新华社', type = 'video', tail = '' } = {}) =>
+  `<section class="channels_iframe_wrp" nodeleaf="">`
+  + `<mp-common-videosnap class="js_uneditable channels_iframe videosnap_video_iframe js_wechannel_video_card"`
+  + ` data-pluginname="mpvideosnap" data-nickname="${nick}" data-type="${type}"></mp-common-videosnap>`
+  + `</section>${tail}`;
+
+test('视频号卡片：没有播放页，指回原文并带定位参数', async () => {
+  const { body } = await render(snapCard());
+  assert.match(
+    body,
+    /\[视频（视频号 · 新华社）\]\(https:////mp/.weixin/.qq/.com//s//test/?wxmd_video=1/)/
+  );
+});
+
+test('视频号卡片：多个按正文顺序编号', async () => {
+  const { body } = await render(
+    snapCard({ tail: '<p>中间一段</p>' })
+    + snapCard({ nick: '央视新闻' })
+  );
+  const first = body.indexOf('wxmd_video=1');
+  const second = body.indexOf('wxmd_video=2');
+  assert.ok(first >= 0 && second > first, '两个卡片应分别拿到 1 和 2');
+  assert.match(body, /视频号 · 央视新闻/);
+});
+
+test('视频号直播：标注为直播而不是视频', async () => {
+  const { body } = await render(snapCard({ type: 'live' }));
+  assert.match(body, /\[直播（视频号直播 · 新华社）\]/);
+});
+
+test('原文已带参数和 #wechat_redirect：定位参数追加在 hash 之前', async () => {
+  const { body } = await render(
+    snapCard(),
+    {},
+    { url: 'https://mp.weixin.qq.com/s?__biz=MzA4&mid=244&idx=1&sn=abc#wechat_redirect' }
+  );
+  assert.match(body, /__biz=MzA4&mid=244&idx=1&sn=abc&wxmd_video=1#wechat_redirect/);
+});
+
+test('视频号卡片：卡片里的 UI 文案不能当正文导出', async () => {
+  const { body } = await render(
+    '<section class="channels_iframe_wrp"><mp-common-videosnap data-nickname="新华社"'
+    + ' data-type="video">已关注 重播 分享 2704</mp-common-videosnap></section>'
+  );
+  assert.ok(!/已关注|重播|2704/.test(body), '播放器 UI 文案漏进正文了');
+});
+
+test('微信自营视频（videosnippet）仍然给可播放页，不带定位参数', async () => {
+  const { body } = await render(
+    '<mp-common-videosnippet><iframe data-src="https://mp.weixin.qq.com/mp/readtemplate?t=pages/video_player_tmpl&action=mpvideo&vid=wxv_1234567890123456"></iframe></mp-common-videosnippet>'
+  );
+  assert.match(body, /readtemplate\?t=pages\/video_player_tmpl/);
+  assert.ok(!/wxmd_video/.test(body), '自营视频不该带定位参数');
+});

@@ -65,6 +65,74 @@
     return;
   }
 
+  // ---------- 按 URL 参数定位到视频号卡片 ----------
+  // md 里「视频（视频号 · 新华社）」的链接会带 ?wxmd_video=N。
+  // 不能用 #hash 或 #:~:text=：微信页面在加载后约 300ms 内会 replaceState 把 hash
+  // 抹掉（实测 400ms 时 location.href 已经没有 fragment、scrollY 仍是 0），
+  // 浏览器自带的 text fragment 因此必然失效，只能在页面就绪后自己滚。
+  // 未装扩展时这个参数没有任何副作用，微信照常打开文章。
+  scrollToVideoFromUrl();
+
+  function scrollToVideoFromUrl() {
+    let seq = 0;
+    try {
+      seq = parseInt(new URLSearchParams(location.search).get('wxmd_video') || '', 10);
+    } catch (e) {
+      return;
+    }
+    if (!seq || seq < 1) return;
+
+    // 与 lib/attachment.js 的 SNAP_SEL 同序：按 DOM 顺序数「视频号卡片」这一类，
+    // 少一个选择器或换个顺序，第 N 个就会对不上。
+    const SEL = 'mp-common-videosnap, mp-common-videoplayer, mp-common-videobox';
+
+    // 用户一动就交出控制权：加载慢的页面不该在几秒后把正在读的人拽回去
+    let userMoved = false;
+    const release = () => { userMoved = true; };
+    window.addEventListener('wheel', release, { passive: true, once: true });
+    window.addEventListener('touchmove', release, { passive: true, once: true });
+    // 拖滚动条、点选文字不会触发 wheel，但同样是「人在操作」
+    window.addEventListener('pointerdown', release, { passive: true, once: true });
+
+    // 是否成功定位过。定位过之后只在 3s 内做漂移校正，不再无限等，
+    // 免得用户在读的时候被拽回视频处。
+    let landed = false;
+
+    const jump = () => {
+      if (userMoved) return;
+      const el = document.querySelectorAll(SEL)[seq - 1];
+      if (!el) return;
+      const target = Math.max(
+        0,
+        el.getBoundingClientRect().top + window.pageYOffset
+          - Math.max(72, Math.round(window.innerHeight * 0.1))
+      );
+      landed = true;
+      // 已经在附近就别再动：smooth 滚动期间 pageYOffset 还在变，
+      // 没有这个容差会在下一轮重复触发，页面看起来在抖
+      if (Math.abs(window.pageYOffset - target) < 40) return;
+      window.scrollTo({ top: target, behavior: 'smooth' });
+    };
+
+    // 图片懒加载会边滚边撑高，一次定位经常落在错的地方，分几轮校正
+    [0, 600, 1500, 3000].forEach(delay => setTimeout(jump, delay));
+
+    // 弱网 / 冷启动时卡片可能 3 秒后才挂进 DOM，继续等：只在一次都没定位到时才动
+    [5000, 8000, 12000].forEach(delay => setTimeout(() => {
+      if (!landed) jump();
+    }, delay));
+
+    // 兜底诊断：12.5s 还没滚到就说明参数和页面已经对不上，留一行控制台线索
+    setTimeout(() => {
+      if (landed) return;
+      const nodes = document.querySelectorAll(SEL);
+      console.warn('[wx-md] 未能定位第 ' + seq + ' 个视频卡片：'
+        + (nodes.length
+          ? '页面只有 ' + nodes.length + ' 个视频卡片，序号超出范围'
+          : '页面上没有找到视频卡片元素（扩展版本过旧、未重载时不会有任何定位动作）'));
+    }, 12500);
+  }
+
   // closed：isolated world 只隔离 JS 环境，DOM 树是和页面共享的。
   // open 模式下页面脚本可以 host.shadowRoot.getElementById('wxMdExport').click()，
   // 直接驱动扩展导出、甚至改写浮窗文案做 UI 伪装。closed 让 shadowRoot 反查返回 null。
