@@ -117,3 +117,36 @@ test('byteLength 与 toDataUrl 的上限判断口径一致', () => {
   assert.equal(DL.byteLength(text), 100);
   assert.doesNotThrow(() => DL.toDataUrl(text, 100));
 });
+
+// ---------- 文件后缀变量 {{ext}} ----------
+
+test('resolveTemplate：{{ext}} 取图片真实格式，统一大写', () => {
+  assert.equal(N.resolveTemplate('{{index1}}.{{ext}}', 0, 'u', { ext: 'webp' }), '1.WEBP');
+  assert.equal(N.resolveTemplate('{{index1}}.{{ext}}', 4, 'u', { ext: 'png' }), '5.PNG');
+  assert.equal(N.resolveTemplate('IMG_{{ext}}_{{index1}}', 0, 'u', { ext: 'gif' }), 'IMG_GIF_1');
+});
+
+test('resolveTemplate：非图片模板里 {{ext}} 渲染成空串，不留字面量', () => {
+  assert.equal(N.resolveTemplate('{{title}}.{{ext}}', 0, 'u', { title: 'T' }), 'T');
+  assert.equal(N.resolveTemplate('IMG-{{ext}}-{{index1}}', 0, 'u', {}), 'IMG--1');
+  // 文件夹/路径模板同样没有值
+  assert.equal(N.resolveTemplate('{{ext}}/{{index1}}', 0, 'u', {}, true), '1');
+});
+
+test('withRealExt：模板自带后缀时不重复补', () => {
+  assert.equal(N.withRealExt('1', 'png'), '1.png');
+  assert.equal(N.withRealExt('1.png', 'png'), '1.png');
+  assert.equal(N.withRealExt('1.PNG', 'png'), '1.PNG');
+  assert.equal(N.withRealExt('1.png', 'webp'), '1.png.webp');
+  // Markdown 名称写了 {{ext}} 后不要再拼一次 .md
+  assert.equal(N.withRealExt('文章.MD', 'md'), '文章.MD');
+  assert.equal(N.withRealExt('文章', 'md'), '文章.md');
+});
+
+test('extFromUrl：tp > 路径 webp > wx_fmt > 前缀 > 文件后缀', () => {
+  assert.equal(N.extFromUrl('https://mmbiz.qpic.cn/mmbiz_png/a/640?wx_fmt=png&tp=webp'), 'webp');
+  assert.equal(N.extFromUrl('https://mmbiz.qpic.cn/mmbiz_png/a/640?wx_fmt=png'), 'png');
+  assert.equal(N.extFromUrl('https://mmbiz.qpic.cn/sz_mmbiz_jpg/a/640'), 'jpg');
+  assert.equal(N.extFromUrl('https://example.com/a/b.gif'), 'gif');
+  assert.equal(N.extFromUrl(''), 'jpg');
+});

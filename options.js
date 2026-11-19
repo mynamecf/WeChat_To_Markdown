@@ -172,10 +172,15 @@ function applyRefForMode(folderMode) {
   if (imageRefPrefixInput) imageRefPrefixInput.value = st.prefix;
 }
 
-/** 预览用：默认以第一张图片（index 0）为例；传 index 可看第 N 张的命名结果。 */
-function parseTemplate(tplStr, isFirstImage = false, isPath = false, titleOverride = null, index = 0) {
+/**
+ * 预览用：默认以第一张图片（index 0）为例；传 index 可看第 N 张的命名结果。
+ * ext 只在「图片文件命名」与「图片保存目录」两个预览里传（用 png 当示例），
+ * 其它模板不传，免得让人以为文件夹名、Markdown 名称里写 {{ext}} 也有值。
+ */
+function parseTemplate(tplStr, isFirstImage = false, isPath = false, titleOverride = null, index = 0, ext = '') {
   if (!tplStr) return '';
-  const meta = titleOverride ? { ...PREVIEW_META, title: titleOverride } : PREVIEW_META;
+  const base = titleOverride ? { ...PREVIEW_META, title: titleOverride } : PREVIEW_META;
+  const meta = ext ? { ...base, ext } : base;
   return NAMING.resolveTemplate(tplStr, index, PREVIEW_URL, meta, isPath);
 }
 
@@ -240,6 +245,19 @@ function markSaved() {
 
 // 预览里放几张图片：模板含 {{index1}} 时能看出连续编号，不含时也能看出撞名怎么被改名
 const PREVIEW_IMAGE_COUNT = 3;
+// 三张示例图各自的格式：png / jpg 混排是公众号文章里最常见的情况，
+// 也能顺带演示「目录里写 {{ext}} 会按格式分目录」。
+const PREVIEW_IMAGE_EXTS = ['png', 'jpg', 'png'];
+
+/**
+ * 预览里补后缀。真实落盘由 background.js 调同一个 withRealExt，
+ * 所以「模板已经带 .MD / .PNG 就不再补」这条规则在两边必然一致。
+ * 图片预览用 PREVIEW_IMAGE_EXTS 里那一张的格式当示例。
+ */
+function withPreviewExt(name, ext = 'png') {
+  if (typeof NAMING.withRealExt === 'function') return NAMING.withRealExt(name, ext);
+  return new RegExp('\\.' + ext + '$', 'i').test(name) ? name : name + '.' + ext;
+}
 
 /**
  * 模板没用到 {{index1}} 时，三张图会得到同一个文件名。
@@ -264,16 +282,26 @@ function uniquifyPreviewName(name, used) {
   return candidate;
 }
 
-function appendImageNodes(children, imgDirVal, names) {
-  const dirs = imgDirVal ? imgDirVal.split('/').filter(Boolean) : [];
-  let container = children;
-  dirs.forEach(dir => {
-    const folder = { type: 'folder', name: dir, icon: '📁', children: [] };
-    container.push(folder);
-    container = folder.children;
-  });
-  names.forEach(name => {
-    container.push({ type: 'file', name: name + '.png', icon: '🖼️' });
+/**
+ * 把图片节点挂进预览树。
+ *
+ * items 是 [{ dir, name }] —— 目录按张给：目录模板里有 {{ext}} 时，同一篇文章的
+ * png 与 jpg 目录名不同，必须逐张算。同名目录要复用同一个节点（按路径合并），
+ * 否则 PNG/ 会在树里出现两棵，看起来像两个目录。
+ */
+function appendImageNodes(children, items) {
+  items.forEach(item => {
+    const dirs = String(item.dir || '').split('/').filter(Boolean);
+    let container = children;
+    dirs.forEach(dir => {
+      let folder = container.find(n => n.type === 'folder' && n.name === dir);
+      if (!folder) {
+        folder = { type: 'folder', name: dir, icon: '📁', children: [] };
+        container.push(folder);
+      }
+      container = folder.children;
+    });
+    container.push({ type: 'file', name: item.name, icon: '🖼️' });
   });
 }
 
@@ -382,23 +410,28 @@ function renderImageRef(imgDirVal, fileName, noteFolderVal, prefixVal) {
 
 function updatePreview() {
   const onlineVal = parseTemplate(onlineFilenameInput.value, false, false);
-  previewOnline.innerHTML = `<span class="file">📄 ${esc(onlineVal || 'article')}.md</span>`;
+  previewOnline.innerHTML = `<span class="file">📄 ${esc(withPreviewExt(onlineVal || 'article', 'md'))}</span>`;
 
   const mode = getSelectedFolderMode();
   // 逐篇 / 平铺各用自己那套图片规则
   const imgDirInput = mode === 'shared' ? sharedImageFolderInput : folderInput;
   const imgNameInput = mode === 'shared' ? sharedImageFilenameInput : filenameInput;
-  const imgDirVal = parseTemplate(imgDirInput.value, false, true);
 
-  // 三张图片的文件名：{{index1}} 会依次变成 1/2/3；模板不含索引时按 Chrome
-  // 的撞名规则补「 (1)」「 (2)」，让预览与真实落盘一致。
+  // 三张示例图的格式：故意用 png / jpg 混排，让「目录里写 {{ext}} 会按格式
+  // 分开」在预览里直接看得见（不含 {{ext}} 时三张自然合并回同一个目录）。
+  // 图片命名的 {{ext}} 也用各自的格式，否则会出现 JPG/ 目录里躺着 .png 的怪象。
   const used = new Set();
-  const imgNames = [];
+  const imgItems = [];
   for (let i = 0; i < PREVIEW_IMAGE_COUNT; i++) {
-    const base = parseTemplate(imgNameInput.value, true, false, null, i) || ('IMG_' + (i + 1));
-    imgNames.push(uniquifyPreviewName(base, used));
+    const ext = PREVIEW_IMAGE_EXTS[i % PREVIEW_IMAGE_EXTS.length];
+    const base = parseTemplate(imgNameInput.value, true, false, null, i, ext) || ('IMG_' + (i + 1));
+    imgItems.push({
+      dir: parseTemplate(imgDirInput.value, false, true, null, 0, ext),
+      // 先补后缀再去重：Chrome 的撞名规则是「a (1).png」，不是「a.png (1)」
+      name: uniquifyPreviewName(withPreviewExt(base, ext), used)
+    });
   }
-  const firstImageFile = imgNames[0] + '.png';
+  const firstImage = imgItems[0];
 
   // .md 自己所在的文件夹（相对下载根目录）：自定义前缀里的 {{noteFolder}} 要用它
   let noteFolder = 'article';
@@ -411,10 +444,10 @@ function updatePreview() {
     const mdNameB = parseTemplate(sharedFilenameInput.value, false, false, '微信文章标题B') || 'article';
 
     const children = [
-      { type: 'file', name: mdNameA + '.md', icon: '📄' },
-      { type: 'file', name: mdNameB + '.md', icon: '📄' }
+      { type: 'file', name: withPreviewExt(mdNameA, 'md'), icon: '📄' },
+      { type: 'file', name: withPreviewExt(mdNameB, 'md'), icon: '📄' }
     ];
-    appendImageNodes(children, imgDirVal, imgNames);
+    appendImageNodes(children, imgItems);
 
     previewDownload.innerHTML = renderTree('📁', sharedVal, 'folder', children);
   } else {
@@ -423,15 +456,17 @@ function updatePreview() {
     // 与 background.js 一致：md 文件名只取文件夹路径的最后一段
     const mdFileName = folderVal.split('/').pop() || folderVal;
 
-    const children = [{ type: 'file', name: mdFileName + '.md', icon: '📄' }];
-    appendImageNodes(children, imgDirVal, imgNames);
+    const children = [{ type: 'file', name: withPreviewExt(mdFileName, 'md'), icon: '📄' }];
+    appendImageNodes(children, imgItems);
 
     previewDownload.innerHTML = renderTree('📁', folderVal, 'folder', children);
   }
 
   // 自定义前缀原样传下去：清洗（斜杠、空格编码）统一在 buildImageRef 里做，
-  // 保证预览和真实导出走同一套规则
-  renderImageRef(imgDirVal, firstImageFile, noteFolder, imageRefPrefixInput ? imageRefPrefixInput.value.trim() : '');
+  // 保证预览和真实导出走同一套规则。路径与文件名都取第一张图 —— 与 md 里
+  // 「第 1 张」那一行一致。
+  renderImageRef(firstImage.dir, firstImage.name, noteFolder,
+    imageRefPrefixInput ? imageRefPrefixInput.value.trim() : '');
 }
 
 let previewTimer = 0;

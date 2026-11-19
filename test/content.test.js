@@ -222,3 +222,71 @@ test('微信自营视频（videosnippet）仍然给可播放页，不带定位�
   assert.match(body, /readtemplate\?t=pages\/video_player_tmpl/);
   assert.ok(!/wxmd_video/.test(body), '自营视频不该带定位参数');
 });
+
+test('图片命名模板：{{ext}} 取这张图的真实格式，大写', async () => {
+  const { images } = await render(
+    '<p><img data-src="https://mmbiz.qpic.cn/mmbiz_png/abc/640?wx_fmt=png"></p>',
+    { imageFilename: '{{index1}}.{{ext}}' }
+  );
+  assert.equal(images.length, 1);
+  assert.equal(images[0].filenameBase, '1.PNG');
+});
+
+test('图片命名模板：{{ext}} 与 {{index1}} 混用，各自取值', async () => {
+  const { images } = await render(
+    '<p><img data-src="https://mmbiz.qpic.cn/mmbiz_png/a/640?wx_fmt=png">'
+    + '<img data-src="https://mmbiz.qpic.cn/mmbiz_jpg/b/640?wx_fmt=jpeg"></p>',
+    { imageFilename: 'IMG-{{ext}}-{{index1}}' }
+  );
+  assert.deepEqual(images.map(i => i.filenameBase), ['IMG-PNG-1', 'IMG-JPG-2']);
+});
+
+test('Markdown 名称模板：{{ext}} 无值（该变量仅图片命名可用）', async () => {
+  const { result } = await render('<p>x</p>', { onlineFilename: '{{title}}_{{ext}}' });
+  assert.equal(result.onlineFilename, '测试文章');
+});
+
+test('图片保存目录模板：{{ext}} 按每张图的格式分目录（png/jpg 混排）', async () => {
+  const { result, images } = await render(
+    '<p><img data-src="https://mmbiz.qpic.cn/mmbiz_png/a/640?wx_fmt=png">'
+    + '<img data-src="https://mmbiz.qpic.cn/mmbiz_jpg/b/640?wx_fmt=jpeg">'
+    + '<img data-src="https://mmbiz.qpic.cn/mmbiz_png/c/640?wx_fmt=png"></p>',
+    { imageFolder: '{{ext}}/img' }
+  );
+  // 每张图带走自己的目录，background 按 item.folder 落盘与写引用
+  assert.deepEqual(images.map(i => i.folder), ['PNG/img', 'JPG/img', 'PNG/img']);
+  // 文章级目录取第一张，只用于统计 / 老载荷兼容
+  assert.equal(result.imageFolder, 'PNG/img');
+});
+
+test('图片保存目录模板：整篇同格式时仍然是同一个目录', async () => {
+  const { images } = await render(
+    '<p><img data-src="https://mmbiz.qpic.cn/mmbiz_png/a/640?wx_fmt=png">'
+    + '<img data-src="https://mmbiz.qpic.cn/mmbiz_png/b/640?wx_fmt=png"></p>',
+    { imageFolder: '{{ext}}' }
+  );
+  assert.deepEqual(images.map(i => i.folder), ['PNG', 'PNG']);
+});
+
+test('图片保存目录模板：不含 {{ext}} 时不会凭空拆目录', async () => {
+  const { images } = await render(
+    '<p><img data-src="https://mmbiz.qpic.cn/mmbiz_png/a/640?wx_fmt=png">'
+    + '<img data-src="https://mmbiz.qpic.cn/mmbiz_jpg/b/640?wx_fmt=jpeg"></p>',
+    { imageFolder: 'img/{{date:YYYY}}' }
+  );
+  assert.equal(images[0].folder, images[1].folder);
+  assert.match(images[0].folder, /^img\/\d{4}$/);
+});
+
+test('图片保存目录模板：没有可下载图片时 {{ext}} 为空，不留字面量', async () => {
+  const { result } = await render('<p>纯文字</p>', { imageFolder: '{{ext}}/img' });
+  assert.equal(result.imageFolder, 'img');
+});
+
+test('图片保存目录模板：平铺归档用 sharedImageFolder，同样有 {{ext}}', async () => {
+  const { result } = await render(
+    '<p><img data-src="https://mmbiz.qpic.cn/mmbiz_jpg/c/640?wx_fmt=jpeg"></p>',
+    { folderMode: 'shared', sharedImageFolder: '{{ext}}' }
+  );
+  assert.equal(result.imageFolder, 'JPG');
+});

@@ -586,6 +586,9 @@
               <div class="input-wrapper">
                 <input type="text" id="imageFolder" placeholder="{{date:YYYY}}/{{date:MM}}/{{date:DD}}">
               </div>
+              <div class="input-hint">
+                写 <code>{{ext}}</code> 可按每张图的格式分子目录：<code>{{ext}}</code> 得到 <code>PNG</code> / <code>JPG</code> 两个目录，<code>{{ext}}/img</code> 得到 <code>PNG/img</code> 与 <code>JPG/img</code>。
+              </div>
             </div>
             <div class="input-group">
               <label class="input-label">图片文件命名</label>
@@ -618,6 +621,9 @@
               <label class="input-label">图片保存目录（相对共享文件夹）</label>
               <div class="input-wrapper">
                 <input type="text" id="sharedImageFolder" placeholder="{{date:YYYY}}/{{date:MM}}/{{date:DD}}">
+              </div>
+              <div class="input-hint">
+                写 <code>{{ext}}</code> 可按每张图的格式分子目录，规则与逐篇归档相同。
               </div>
             </div>
 
@@ -753,7 +759,7 @@
             可用变量
           </div>
           <div class="var-head-right">
-            <span class="var-badge">13个变量</span>
+            <span class="var-badge">14个变量</span>
             <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="6 9 12 15 18 9"></polyline>
             </svg>
@@ -785,6 +791,7 @@
                 <tr><td>{{index}}</td><td>图片序号，从 0 开始</td></tr>
                 <tr><td>{{index1}}</td><td>图片序号，从 1 开始</td></tr>
                 <tr><td>{{hash8}}</td><td>URL 的 8 位哈希</td></tr>
+                <tr><td>{{ext}}</td><td>图片真实格式，大写且不含点 (PNG / JPG / WEBP / GIF / BMP / SVG)。用于「图片文件命名」与「图片保存目录」；写在目录里时按<b>每张图的格式</b>分目录，如 <code>{{ext}}/img</code> 会得到 <code>PNG/img</code> 与 <code>JPG/img</code></td></tr>
               </tbody>
             </table>
           </div>

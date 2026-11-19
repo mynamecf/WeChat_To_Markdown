@@ -64,6 +64,11 @@
   }
   const resolveTemplate = WXMD_NAMING.resolveTemplate;
   const resolveDateOnlyTemplate = WXMD_NAMING.resolveDateOnlyTemplate;
+  // {{ext}} 用这张图的真实格式。与 background.js 落盘补后缀调的是同一个函数，
+  // 所以模板里写 {{ext}}、和最终落盘的 .png / .webp 不会各说一套。
+  const imgExtFromUrl = (typeof WXMD_NAMING.extFromUrl === 'function')
+    ? WXMD_NAMING.extFromUrl
+    : function fallbackExt() { return 'jpg'; };
 
   // 私有地址判断缺失时可以降级，但不能「静默失效」——否则每张图都会因
   // ReferenceError 被 isDownloadableImageUrl 的 catch 吞掉，整篇文章的图片全变成在线链接。
@@ -162,15 +167,15 @@
   const resolvedDownloadFolder = resolveTemplate(settings.downloadFolder, 0, url, articleMeta, true);
   const resolvedSharedFolder = resolveDateOnlyTemplate(settings.sharedFolder);
   const resolvedSharedFilename = resolveTemplate(settings.sharedFilename, 0, url, articleMeta, false);
-  const resolvedImageFolder = resolveTemplate(imageFolderTemplate, 0, url, articleMeta, true);
+  // 图片目录在图片收集时按张解析（模板里的 {{ext}} 用每张图自己的格式），
+  // 所以这里只记「文章级兜底目录」，见下面 resolvedImageFolder
 
   LOG('resolved config', {
     imageMode, folderMode,
     onlineFilename: resolvedOnlineFilename,
     downloadFolder: resolvedDownloadFolder,
     sharedFolder: resolvedSharedFolder,
-    sharedFilename: resolvedSharedFilename,
-    imageFolder: resolvedImageFolder
+    sharedFilename: resolvedSharedFilename
   });
 
   // ---------- 正文提取 ----------
@@ -243,9 +248,16 @@
         return;
       }
       const idx = imageList.length;
-      const filenameBase = resolveTemplate(imageFilename, idx, realSrc, articleMeta, false);
+      // ext 是这张图自己的真实格式（渲染成大写 PNG / JPG / WEBP）：
+      // 图片命名各用各的，图片目录也各用各的 —— 目录模板里写了 {{ext}}，
+      // 一篇 png/jpg 混排的文章就会分别落到 PNG/ 与 JPG/ 两个子目录。
+      const imgMeta = { ...articleMeta, ext: imgExtFromUrl(realSrc) };
+      const filenameBase = resolveTemplate(imageFilename, idx, realSrc, imgMeta, false);
+      // 目录的 index 固定传 0：目录不该跟着图片序号变，否则一张图一个目录。
+      // 只有 ext 按张取，其余变量（标题 / 日期 / 序号）全篇一致。
+      const folder = resolveTemplate(imageFolderTemplate, 0, url, imgMeta, true);
       img.setAttribute('data-img-idx', String(idx));
-      imageList.push({ url: realSrc, filenameBase });
+      imageList.push({ url: realSrc, filenameBase, folder });
     }
   });
 
@@ -254,6 +266,16 @@
       `[wx-md] ${blockedImages} 张图片未下载（内网地址或非微信图床），已保留在线链接`
     );
   }
+
+  // 文章级图片目录：与「按张目录」保持同一份兜底值，取第一张图那一段。
+  // 真正落盘用的是每张图自己的 folder（见上面 imageList.push），这里只用于
+  // 统计、日志与老载荷兼容；没有可下载图片时 {{ext}} 为空，目录名少这一段
+  // 而不是留 {{ext}} 字面量。
+  const resolvedImageFolder = imageList.length
+    ? imageList[0].folder
+    : resolveTemplate(imageFolderTemplate, 0, url, articleMeta, true);
+  LOG('resolved image folder', resolvedImageFolder,
+    imageList.length ? imgExtFromUrl(imageList[0].url) : '(无图片)');
 
   /** 可下载的图片地址：仅 http(s)、不指向内网，且（默认）命中微信图床白名单 */
   function isDownloadableImageUrl(u) {

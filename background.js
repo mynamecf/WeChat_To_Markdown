@@ -326,17 +326,23 @@ async function doExport(article) {
   // 否则 limitPath 只裁了图片路径、md 里的引用还是完整目录，链接必然对不上。
   if (targetFolder) targetFolder = limitPath(targetFolder, 160);
 
-  const targetFile = targetFolder ? `${targetFolder}/${mdName}.md` : `${mdName}.md`;
+  // Markdown 名称里也可能自己写后缀（{{title}}.{{ext}} → 文章.MD），
+  // 直接拼 '.md' 会得到「文章.MD.md」。与图片补后缀同一套规则。
+  const mdFile = withRealExt(mdName, 'md');
+  const targetFile = targetFolder ? `${targetFolder}/${mdFile}` : mdFile;
 
   if (imageMode === 'download' && images.length > 0) {
-    const imgDir = safePath(article.imageFolder);
+    // 目录是按张给的：目录模板里写了 {{ext}} 时，png 与 jpg 会落到不同子目录。
+    // 老载荷（content.js 还没带 folder 字段）回落到文章级 imageFolder。
+    const fallbackDir = safePath(article.imageFolder);
 
     const items = images.map(item => {
       const base = safePath(item && item.filenameBase) || 'image';
       return {
         url: (item && typeof item.url === 'string') ? item.url : '',
         filenameBase: base,
-        realExt: extFromUrl(item && item.url)
+        realExt: extFromUrl(item && item.url),
+        imgDir: (item && typeof item.folder === 'string') ? safePath(item.folder) : fallbackDir
       };
     });
     stats.total = items.length;
@@ -345,7 +351,7 @@ async function doExport(article) {
     // 用的是同一组 imgDir / filename，不会一个裁了一个没裁。
     const budget = Math.max(20, 200 - (targetFolder ? targetFolder.length + 1 : 0));
     const planned = items.map(item => {
-      const fit = fitImageRel(imgDir, `${item.filenameBase}.${item.realExt}`, budget);
+      const fit = fitImageRel(item.imgDir, withRealExt(item.filenameBase, item.realExt), budget);
       return fit;
     });
 
@@ -474,76 +480,12 @@ function toMarkdownDataUrl(markdown, mode) {
 }
 
 // ---------- 图片扩展名：从 URL 推断，零网络请求 ----------
-
-/**
- * 微信图片 URL 通常带 wx_fmt 参数（png / jpeg / gif / webp），
- * 这是最准确的来源。原先用 HEAD / Range 请求探测 content-type，
- * 但 qpic 有 Referer 防盗链，扩展 SW 的 fetch 不带站内 Referer，
- * 结果是每张图 2 次必然失败的请求，还会触发限流。
- */
-const IMG_FMT_ALIASES = {
-  png: 'png',
-  jpg: 'jpg',
-  jpeg: 'jpg',
-  gif: 'gif',
-  webp: 'webp',
-  bmp: 'bmp',
-  svg: 'svg'
-};
-
-function normalizeImgFmt(v) {
-  return IMG_FMT_ALIASES[String(v || '').trim().toLowerCase()] || '';
-}
-
-/** 从 /mmbiz_png/、/sz_mmbiz_jpg/ 这类路径段里取原始存储格式 */
-function extractMmbizPrefix(path) {
-  const m = path.match(/(?:^|\/)(?:sz_)?mmbiz_([a-z]+)(?:\/|$)/);
-  return m ? m[1] : '';
-}
-
-/**
- * 微信图片 URL 里「存储格式」和「下发格式」是两件事：
- *   /mmbiz_png/xxx/640?wx_fmt=png&tp=webp
- * 存储是 png，但 tp=webp 要求 CDN 转码成 webp 下发。
- * 只取 wx_fmt 会把 webp 字节存成 .png，部分编辑器按扩展名判断就预览不了。
- *
- * 信号按可靠性排序：tp > 路径 webp > wx_fmt > 路径前缀 > 文件后缀。
- * 注意 tp=webp 是否真的生效取决于 CDN 对 UA/Accept 的判断，
- * 这里按 Chrome 客户端（downloads API 走 Chrome UA）会拿到 webp 处理。
- */
-function extFromUrl(url) {
-  if (!url || typeof url !== 'string') return 'jpg';
-
-  let u;
-  try {
-    u = new URL(url);
-  } catch (e) {
-    return 'jpg';
-  }
-
-  const path = u.pathname.toLowerCase();
-  const params = u.searchParams;
-
-  // 1. tp=webp —— 显式请求 CDN 转码，优先级最高
-  if ((params.get('tp') || '').toLowerCase() === 'webp') return 'webp';
-
-  // 2. 路径本身就是 webp 资源（用 pathname，避免查询参数里出现 mmbiz_webp 误命中）
-  if (/(?:^|\/)(?:sz_)?mmbiz_webp(?:\/|$)/.test(path)) return 'webp';
-
-  // 3. wx_fmt —— 请求参数，最贴近实际下发格式
-  const byParam = normalizeImgFmt(params.get('wx_fmt'));
-  if (byParam) return byParam;
-
-  // 4. 路径前缀兜底（wx_fmt 缺失或为 other 时）
-  const byPrefix = normalizeImgFmt(extractMmbizPrefix(path));
-  if (byPrefix) return byPrefix;
-
-  // 5. 文件名后缀
-  const m = path.match(/\.(png|jpe?g|gif|webp|bmp|svg)$/);
-  if (m) return normalizeImgFmt(m[1]) || 'jpg';
-
-  return 'jpg';
-}
+// 实现收到 lib/naming.js：content.js 生成 {{ext}} 时也要用同一份规则，
+// 两处各写一套必然漂移（webp/png 判断差一步，md 里就是裂图）。
+const extFromUrl = WXMD_NAMING.extFromUrl;
+// 补后缀的规则与配置页预览共用一份：模板里自己写了 .{{ext}} 时不再重复补，
+// 否则会得到 1.png.png。两边各写一套必然出现「预览 1.png、落盘 1.png.png」。
+const withRealExt = WXMD_NAMING.withRealExt;
 
 // ---------- 图片地址安全校验 ----------
 
