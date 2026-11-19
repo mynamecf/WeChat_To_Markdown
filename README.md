@@ -2,7 +2,7 @@
 
 一个 Chrome / Edge 扩展（Manifest V3），把微信公众号文章一键保存成 Markdown：正文转成干净排版、图片下载到本地、链接落成笔记软件能直接读的相对路径。
 
-当前版本：**1.16.28.0**　｜　完整更新记录见 [ReadMe.txt](./ReadMe.txt)
+当前版本：**1.16.29.0**　｜　更新记录见 [ReadMe.txt](./ReadMe.txt)，逐次改动的实现细节见 [docs/DEVLOG.md](./docs/DEVLOG.md)
 
 ---
 
@@ -15,7 +15,7 @@
 - **可配置命名**：文章名、文件夹名、图片目录、图片文件名都支持模板，共 13 个变量（`{{title}}`、`{{author}}`、`{{date:YYYYMMDD}}`、`{{index1}}`…）。
 - **特殊排版适配**：代码块围栏化、伪标题还原、浮动序号合并、嵌套列表缩进、样式画的引用块、GFM 表格、图片消息（图文／小绿书）补图并清 UI 噪音。
 - **视频 / 语音只留链接**：不下载视频本体，正文原位置写在线播放地址。视频号卡片（`mp-common-videosnap`）没有网页播放页，改为指回原文并带 `?wxmd_video=N`，装了扩展时点开会自动滚到那个视频。
-- **不联网、不上传**：所有解析与转换都在本机完成，扩展没有账号体系，也不向任何服务器发送内容。
+- **不联网、不上传**：所有解析与转换都在本机完成，扩展没有账号体系，也不向任何服务器发送内容。唯一可能出网的是「新版本提醒」——**默认关闭**，只有你手动打开后才会去读一个几十字节的 `version.json`。
 
 ## 安装
 
@@ -27,6 +27,40 @@
 要求 Chrome / Edge **102+**（Manifest V3 + `minimum_chrome_version`）。
 
 修改代码后需要在 `chrome://extensions` 点一次「重新加载」，弹窗和配置页才会用上新代码。
+
+## 支持的浏览器
+
+| 浏览器 | 状态 | 说明 |
+|---|---|---|
+| Chrome / Edge / Brave / Vivaldi / Opera | ✅ 完整支持 | 102+，同一份安装包 |
+| 360 极速 / QQ / 搜狗等 Chromium 内核 | ✅ 可用 | 内核版本需 ≥ 102；用「加载已解压的扩展程序」安装 |
+| Firefox | ⛔ 暂不支持 | 后台是事件页而非 Service Worker，`importScripts` 会直接报错，需要单独适配 |
+| Safari（macOS / iOS） | ⛔ 暂不支持 | Safari 没有 `downloads` API，图片落盘与同名改名那套逻辑要重做 |
+| 手机浏览器 | ⛔ 不可用 | 扩展无法控制下载目录结构；微信内置浏览器更不支持扩展 |
+
+Chromium 全系用同一个包，`npm run build` 产出两份东西：
+
+- `dist/chromium/`：解压后「加载已解压的扩展程序」直接装
+- `dist/wxmd-<版本号>-chromium.zip`：Chrome Web Store / Edge Add-ons / Opera Add-ons 通用上传包
+
+## 版本与更新
+
+扩展**不会自我更新**（浏览器不允许扩展自我安装），升级只由商店完成，或者你自己换包。内置的只是一个提醒：
+
+- 详细配置 → 「版本与更新」 → 打开「有新版本时提醒我」，**默认关闭**。
+- 打开后每 24 小时读一次 `version.json`（地址在 `lib/update.js` 的 `WXMD_UPDATE_URL`，需 HTTPS 且响应头带 `Access-Control-Allow-Origin: *`），只取版本号、更新说明、下载地址。
+- 有新版本：工具栏图标显示 **NEW**，配置页显示更新说明，弹窗顶部出现提醒条；也能「忽略此版本」，下个版本仍会提示。
+- 关掉开关立刻停止：定时器被清掉，不再发任何请求。
+
+更新方式取决于你是怎么装的：
+
+| 安装方式 | 怎么更新 |
+|---|---|
+| Chrome / Edge 商店 | 浏览器自动更新，通常什么都不用做；想立刻更新去 `chrome://extensions` 打开开发者模式 → 「更新」 |
+| 离线包（解压目录） | 下载新包解压覆盖，再到 `chrome://extensions` 点「重新加载」 |
+| crx 双击安装 | 下载新 crx 拖进 `chrome://extensions`，确认替换 |
+
+> 更新不会丢配置：命名模板、开关都保存在浏览器本地存储里。
 
 ## 使用
 
@@ -152,9 +186,12 @@ WeChat_To_Markdown/
 ├── floating.js            页面内浮窗（closed Shadow DOM）与快捷键
 ├── options.html / .js     详细配置页
 ├── content.js             正文提取、图片收集、段落 / 图片 / 附件规则、YAML 收尾
-├── background.js          后台：导出调度、路径规划、下载编排、统计
+├── background.js          后台：导出调度、路径规划、下载编排、统计、更新检查
+├── version.json           版本公告（新版本提醒读取，不参与打包）
 ├── test/                  回归夹具（node --test + jsdom）
-├── tools/pack.js          打包前只挑运行必需文件（不带 node_modules / test）
+├── tools/build.js         产出商店用 zip 与解压即装的 dist/chromium
+├── tools/pack.js          产出 crx（本机双击安装用）
+├── docs/DEVLOG.md         开发日志：每次改动的实现细节与验证数据
 └── lib/
     ├── defaults.js        默认配置、内网与图床判断、官网 / 反馈链接
     ├── naming.js          命名模板、路径清洗、图片引用路径拼装（预览与落盘共用）
@@ -166,6 +203,7 @@ WeChat_To_Markdown/
     ├── imagepost.js       图片消息（图文 / 小绿书）补图与噪音清理
     ├── download.js        下载原语（等终态 / 并发控制 / data URL）
     ├── injectlist.js      注入清单与 executeScript 结果解析（单一来源）
+    ├── update.js          版本检查（比版本号、节流、取 version.json）
     ├── turndown.js        HTML → Markdown（第三方）
     └── turndown-plugin-gfm.js  GFM 表格 / 删除线等（第三方）
 ```
@@ -174,30 +212,31 @@ WeChat_To_Markdown/
 
 ## 安全说明
 
-- 只申请 `activeTab`、`scripting`、`downloads`、`storage`、`tabs`，host 权限仅限 `https://mp.weixin.qq.com/*`。
+- 只申请 `activeTab`、`scripting`、`downloads`、`storage`、`tabs`、`alarms`，host 权限仅限 `https://mp.weixin.qq.com/*`。`alarms` 只用于「新版本提醒」的 24 小时定时检查，开关默认关闭。
 - 文章里的图片地址由作者控制，扩展会拒绝下载指向本机 / 内网（`127.0.0.1`、`10/8`、`192.168/16`、`172.16/12`、link-local、IPv6 ULA 等）的图片；默认还要求命中微信图床白名单，因为字面 hostname 判断挡不住「域名解析到内网」。被拦下的图片只保留在线链接。
 - 浮窗使用 closed Shadow DOM，页面脚本无法读取或模拟点击浮窗按钮。
-- 正文提取、转换、落盘全部在本机完成；除图片本身来自微信图床外，不向任何第三方发送数据。
+- 正文提取、转换、落盘全部在本机完成；除图片本身来自微信图床外，不向任何第三方发送数据。唯一的例外是配置页里手动开启的「新版本提醒」：开启后会定时拉取 `version.json`（只带版本号查询，不包含任何文章内容），关闭即不再发请求。
 
 ## 开发
 
-- 纯原生 JS + HTML/CSS，无构建步骤，改完直接在 `chrome://extensions` 重新加载。
+- 纯原生 JS + HTML/CSS，无编译步骤，改完直接在 `chrome://extensions` 重新加载；发布时才需要打包。
 - 回归测试（首次需 `npm install`，只装 jsdom）：
 
   ```bash
-  npm test    # 31 个用例：段落、表格、代码块、引用/列表、图床白名单、图片消息、命名与安全判断
-  npm run check   # node --check 五个入口脚本
+  npm test       # 49 个用例：段落、表格、代码块、引用/列表、图床白名单、图片消息、命名、版本比较
+  npm run check  # node --check 六个入口脚本
   ```
 
   夹具在 `test/`，用 jsdom 注入**真实的** `lib/` 与 `content.js`，不复制业务逻辑——所以测过的就是线上跑的同一份代码。
 
-- 打包 crx（可选）：
+- 打商店包 / crx（可选）：
 
   ```bash
+  npm run build  # 产物：dist/chromium/（解压即装）+ dist/wxmd-<版本>-chromium.zip（三家商店通用）
   npm run pack   # 产物：WeChat_To_Markdown.crx / .pem，约 0.2 MB
   ```
 
-  直接 `chrome --pack-extension=.` 会把 `node_modules`、`test`、`.git` 一起打进去（3 MB+），`npm run pack` 只复制 `manifest.json` 声明的文件再打包。`.pem` 是签名私钥，别提交、别丢——丢了就没法用同一个扩展 ID 发新版。
+  直接 `chrome --pack-extension=.` 会把 `node_modules`、`test`、`.git` 一起打进去（3 MB+），两个脚本都只复制运行必需文件。`.pem` 是签名私钥，别提交、别丢——丢了就没法用同一个扩展 ID 发新版。
 
 - 调试技巧：`content.js` 顶部把 `DEBUG` 改为 `true`，会打印正文根节点命中情况、图片统计、被拦下的图片等日志；单篇文章出问题时先看这一层。
 - 关于官网 / 反馈入口：地址只在 `lib/defaults.js` 的 `WXMD_LINKS` 里维护，改完重新加载扩展，弹窗、配置页、浮窗同时生效。

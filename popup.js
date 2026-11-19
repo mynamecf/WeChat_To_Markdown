@@ -365,3 +365,54 @@ exportBtn.addEventListener('click', async () => {
     }
   }
 });
+
+// ---------- 新版本提醒条 ----------
+// 只在「开关打开 + 确实有新版 + 该版本没被忽略」时出现。
+// 版本高低按当前 manifest 现算，不能直接用 storage 里的 hasUpdate：
+// 用户更新完扩展后，旧记录会一直挂着「有新版本」。
+const updateBanner = document.getElementById('updateBanner');
+const updateBannerVer = document.getElementById('updateBannerVer');
+
+async function refreshUpdateBanner() {
+  if (!updateBanner || typeof WXMD_UPDATE === 'undefined') return;
+  const s = await chrome.storage.local.get({
+    updateNotify: false,
+    updateLatest: null,
+    updateSkipVersion: ''
+  });
+  const p = s.updateLatest;
+  const current = chrome.runtime.getManifest().version;
+  const show = !!(s.updateNotify && p && p.ok
+    && WXMD_UPDATE.compare(p.latest, current) > 0
+    && p.latest !== s.updateSkipVersion);
+  updateBanner.style.display = show ? 'flex' : 'none';
+  if (show && updateBannerVer) updateBannerVer.textContent = 'v' + p.latest;
+}
+
+if (updateBanner) {
+  refreshUpdateBanner().catch(() => {});
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+    if (!changes.updateLatest && !changes.updateNotify && !changes.updateSkipVersion) return;
+    refreshUpdateBanner().catch(() => {});
+  });
+
+  document.getElementById('updateBannerGo').addEventListener('click', async () => {
+    const s = await chrome.storage.local.get({ updateLatest: null });
+    const url = (s.updateLatest && s.updateLatest.url)
+      || (typeof WXMD_LINKS !== 'undefined' && WXMD_LINKS.homepage)
+      || '';
+    if (!url) return;
+    chrome.tabs.create({ url });
+    window.close();
+  });
+
+  document.getElementById('updateBannerSkip').addEventListener('click', async () => {
+    const s = await chrome.storage.local.get({ updateLatest: null });
+    const ver = s.updateLatest && s.updateLatest.latest;
+    updateBanner.style.display = 'none';
+    if (!ver) return;
+    chrome.runtime.sendMessage({ type: 'SKIP_UPDATE', version: ver }).catch(() => {});
+  });
+}

@@ -6,6 +6,8 @@ importScripts('lib/naming.js');
 // 注入清单与 executeScript 结果解析（唯一来源，popup 也引用同一份）
 importScripts('lib/injectlist.js');
 importScripts('lib/download.js');
+// 版本检查内核（取 version.json / 比版本号 / 算节流），角标与存储在本文件底部
+importScripts('lib/update.js');
 
 const IMG_CONCURRENCY = 4;          // 图片并发下载上限
 // 必须小于 MV3 service worker 的 30 秒空闲回收阈值。
@@ -55,6 +57,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     openOptions(sender, message)
       .then(() => sendResponse({ success: true }))
       .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  // 检查更新：每次都是「读开关 → 节流判断 → 必要时联网」，开关关着直接返回，不发请求。
+  if (message.type === 'CHECK_UPDATE') {
+    checkUpdate({ force: !!message.force })
+      .then(result => sendResponse(result))
+      .catch(err => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  // 忽略某个版本：只是把角标压下去，不影响是否继续检查更新的版本
+  if (message.type === 'SKIP_UPDATE') {
+    skipUpdateVersion(message.version)
+      .then(() => sendResponse({ ok: true }))
+      .catch(err => sendResponse({ ok: false, error: err.message }));
     return true;
   }
 });
@@ -700,3 +718,135 @@ async function rememberDownloadRoot(res, relPath) {
     // 纯展示，失败不影响导出
   }
 }
+
+/* ============================================================================
+ * 版本更新提醒
+ * ----------------------------------------------------------------------------
+ * 策略：默认关闭（updateNotify: false），关着时一次网络请求都不发。
+ *   打开后：装/启动时查一次 + 每 24 小时一次（alarms 是 MV3 后台唯一能存活的定时器，
+ *   setTimeout 在 worker 被回收后必然丢失）。
+ *   有新版 → 工具栏角标 NEW + 配置页/弹窗提示。
+ * 边界：从不自动安装。Chrome/Edge 的扩展没有自我安装能力，
+ *   商店版的更新由浏览器自己完成，这里只负责「让人知道」。
+ * ========================================================================== */
+const UPDATE_ALARM = 'wxmd-update-check';
+const UPDATE_CHECK_MINUTES = 24 * 60;
+const UPDATE_STATE_DEFAULTS = {
+  updateNotify: false,
+  updateLastCheckAt: 0,
+  updateLastFailAt: 0,
+  updateLastError: '',
+  updateSkipVersion: '',
+  updateLatest: null
+};
+
+function readUpdateState() {
+  return chrome.storage.local.get(UPDATE_STATE_DEFAULTS);
+}
+
+function setBadge(text) {
+  try {
+    chrome.action.setBadgeText({ text: text || '' });
+    if (text) chrome.action.setBadgeBackgroundColor({ color: '#07C160' });
+  } catch (e) {}
+}
+
+/** 角标只反映「开关开着 + 确实有新版 + 这个版本没被忽略」 */
+async function refreshUpdateBadge() {
+  const s = await readUpdateState();
+  const p = s.updateLatest;
+  const show = !!(s.updateNotify && p && p.ok && p.hasUpdate && p.latest !== s.updateSkipVersion);
+  setBadge(show ? 'NEW' : '');
+}
+
+function ensureUpdateAlarm(enabled) {
+  try {
+    if (enabled) {
+      chrome.alarms.create(UPDATE_ALARM, { periodInMinutes: UPDATE_CHECK_MINUTES });
+    } else {
+      chrome.alarms.clear(UPDATE_ALARM);
+    }
+  } catch (e) {}
+}
+
+/**
+ * 检查一次（可能被节流跳过）。
+ * force=true 用于用户点「检查更新」——绕过 24 小时节流，但仍然要求开关是开着的，
+ * 否则会出现「开关关着却发了请求」这种和文案矛盾的行为。
+ */
+async function checkUpdate(opts) {
+  const force = !!(opts && opts.force);
+  const s = await readUpdateState();
+  const current = WXMD_UPDATE.currentVersion();
+
+  if (!s.updateNotify) {
+    setBadge('');
+    return { ok: true, disabled: true, current, hasUpdate: false };
+  }
+
+  if (!force && !WXMD_UPDATE.shouldCheck({ lastCheckAt: s.updateLastCheckAt, lastFailAt: s.updateLastFailAt })) {
+    const p = s.updateLatest;
+    return p && p.ok
+      ? { ...p, cached: true }
+      : { ok: true, cached: true, current, hasUpdate: false };
+  }
+
+  const res = await WXMD_UPDATE.check({ current });
+  if (res.ok) {
+    await chrome.storage.local.set({
+      updateLastCheckAt: Date.now(),
+      updateLastFailAt: 0,
+      updateLastError: '',
+      updateLatest: res
+    });
+  } else {
+    // 失败只记时间戳与原因，保留上一次的成功结果：断网时不该把已知的新版本信息抹掉
+    await chrome.storage.local.set({
+      updateLastFailAt: Date.now(),
+      updateLastError: res.error || '未知错误'
+    });
+  }
+  await refreshUpdateBadge();
+  return res;
+}
+
+async function skipUpdateVersion(version) {
+  const v = String(version || '').trim();
+  if (!v) return;
+  await chrome.storage.local.set({ updateSkipVersion: v });
+  setBadge('');
+}
+
+/** 装好 / 每次启动浏览器都走一遍：补上定时器，并按开关决定要不要立刻查一次 */
+async function bootstrapUpdate() {
+  try {
+    const s = await readUpdateState();
+    ensureUpdateAlarm(s.updateNotify);
+    if (!s.updateNotify) {
+      setBadge('');
+      return;
+    }
+    await checkUpdate({ force: false });
+    await refreshUpdateBadge();
+  } catch (e) {
+    // 更新提醒坏了不能影响导出
+  }
+}
+
+chrome.runtime.onInstalled.addListener(() => { bootstrapUpdate(); });
+chrome.runtime.onStartup.addListener(() => { bootstrapUpdate(); });
+
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm && alarm.name === UPDATE_ALARM) {
+    checkUpdate({ force: false }).catch(() => {});
+  }
+});
+
+// 用户在配置页开了/关了开关：立刻生效，不用等下一次 alarms 周期
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !changes.updateNotify) return;
+  const on = !!changes.updateNotify.newValue;
+  ensureUpdateAlarm(on);
+  if (on) checkUpdate({ force: true }).catch(() => {});
+  else setBadge('');
+});

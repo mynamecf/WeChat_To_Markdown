@@ -4,7 +4,8 @@
   "description": "微信公众号文章转 Markdown 的 Chrome 扩展（本文件只用于开发期测试，不参与打包）",
   "scripts": {
     "test": "node --test",
-    "check": "node --check background.js && node --check content.js && node --check floating.js && node --check popup.js && node --check options.js",
+    "check": "node --check background.js && node --check content.js && node --check floating.js && node --check popup.js && node --check options.js && node --check lib/update.js",
+    "build": "node tools/build.js",
     "pack": "node tools/pack.js"
   },
   "devDependencies": {

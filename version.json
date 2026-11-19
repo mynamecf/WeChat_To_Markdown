@@ -1,0 +1,10 @@
+{
+  "version": "1.16.29.0",
+  "published": "2026-11-19",
+  "notes": "1. 新增「新版本提醒」：默认关闭，在详细配置页打开后每 24 小时检查一次，有新版时工具栏图标显示 NEW。\n2. 新增 Chromium 全系安装包：一份产物可用于 Chrome / Edge / Opera / Brave / Vivaldi / 360 / QQ 等内核浏览器。\n3. 优化：视频号卡片链接带 ?wxmd_video=N，装了扩展的浏览器打开后自动滚到视频位置。",
+  "downloads": {
+    "chrome": "https://github.com/yourname/WeChat_To_Markdown/releases/latest",
+    "firefox": "",
+    "offline": "https://github.com/yourname/WeChat_To_Markdown/releases/latest"
+  }
+}

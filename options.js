@@ -892,3 +892,202 @@ document.addEventListener('keydown', e => {
 // 地址只写在 lib/defaults.js 的 WXMD_LINKS 里，这里负责挂到顶栏上。
 // 地址留空时链接会自动隐藏，不会留下点不开的死链。
 if (typeof WXMD_mountSiteLinks === 'function') WXMD_mountSiteLinks();
+
+// ---------- 版本与更新 ----------
+// 提醒开关默认关闭；关着的时候后台不会发任何请求，所以点「检查更新」也先要求打开开关，
+// 否则「默认不联网」这句话就成了空话。
+const updateNotifyInput = document.getElementById('updateNotify');
+const updateCurrentEl = document.getElementById('updateCurrent');
+const updateStatusEl = document.getElementById('updateStatus');
+const updateCheckBtn = document.getElementById('updateCheckBtn');
+const updateNotesEl = document.getElementById('updateNotes');
+const updateNotesTitle = document.getElementById('updateNotesTitle');
+const updateNotesBody = document.getElementById('updateNotesBody');
+const updateGoBtn = document.getElementById('updateGoBtn');
+const updateSkipBtn = document.getElementById('updateSkipBtn');
+
+function sendBg(message) {
+  return new Promise(resolve => {
+    try {
+      chrome.runtime.sendMessage(message, resp => {
+        if (chrome.runtime.lastError) {
+          resolve({ ok: false, error: chrome.runtime.lastError.message });
+          return;
+        }
+        resolve(resp || { ok: false, error: '后台未响应' });
+      });
+    } catch (e) {
+      resolve({ ok: false, error: e.message });
+    }
+  });
+}
+
+function fmtTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (isNaN(d.getTime())) return '';
+  const pad = n => (n < 10 ? '0' + n : String(n));
+  return (d.getMonth() + 1) + '/' + d.getDate() + ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+}
+
+/**
+ * 统一的渲染出口。
+ * 版本高低一律用当前安装版本现算，不能信 storage 里的 hasUpdate ——
+ * 用户装完新版后，旧结果会一直挂着「有新版本」。
+ */
+function renderUpdate(payload, skipVersion, lastCheckAt, lastError) {
+  const current = WXMD_UPDATE.currentVersion();
+  updateCurrentEl.textContent = current || '-';
+
+  const p = payload && payload.ok ? payload : null;
+  const status = updateStatusEl;
+  const notesOn = (on, title, body, goUrl, showSkip) => {
+    updateNotesEl.style.display = on ? 'block' : 'none';
+    if (!on) return;
+    updateNotesTitle.textContent = title;
+    updateNotesBody.textContent = body;
+    updateGoBtn.style.display = goUrl ? '' : 'none';
+    updateSkipBtn.style.display = showSkip ? '' : 'none';
+  };
+
+  if (!p) {
+    // 后台每次失败都会把原因写进 storage：不写的话，开关刚打开就断网时
+    // 页面会永远停在「正在检查…」，用户以为卡死了
+    const err = (payload && payload.error) || lastError;
+    if (err) {
+      status.textContent = '检查失败：' + err + '（1 小时后会自动重试）';
+      status.className = 'update-status err';
+    } else {
+      status.textContent = '尚未检查';
+      status.className = 'update-status';
+    }
+    notesOn(false);
+    return;
+  }
+
+  const hasUpdate = WXMD_UPDATE.compare(p.latest, current) > 0;
+  const skipped = !!skipVersion && skipVersion === p.latest;
+
+  if (hasUpdate && skipped) {
+    status.textContent = '已忽略 v' + p.latest + ' 的提醒，下个版本仍会提示';
+    status.className = 'update-status';
+    notesOn(false);
+    return;
+  }
+
+  if (hasUpdate) {
+    status.textContent = '发现新版本 v' + p.latest + (p.published ? '（' + p.published + '）' : '');
+    status.className = 'update-status ok';
+    notesOn(true, 'v' + p.latest + ' 更新内容',
+      p.notes || '（作者未填写更新说明）', p.url, true);
+    return;
+  }
+
+  status.textContent = '已是最新版本' + (lastCheckAt ? '（上次检查 ' + fmtTime(lastCheckAt) + '）' : '');
+  status.className = 'update-status';
+  notesOn(false);
+}
+
+let updateBusy = false;
+
+async function refreshUpdateFromStorage() {
+  const s = await chrome.storage.local.get({
+    updateNotify: false,
+    updateLatest: null,
+    updateSkipVersion: '',
+    updateLastCheckAt: 0,
+    updateLastError: ''
+  });
+  if (updateNotifyInput) updateNotifyInput.checked = !!s.updateNotify;
+  renderUpdate(s.updateLatest, s.updateSkipVersion, s.updateLastCheckAt, s.updateLastError);
+}
+
+if (updateCurrentEl) {
+  updateCurrentEl.textContent = WXMD_UPDATE.currentVersion() || '-';
+  refreshUpdateFromStorage().catch(() => {});
+}
+
+if (updateNotifyInput) {
+  updateNotifyInput.addEventListener('change', async () => {
+    const on = !!updateNotifyInput.checked;
+    try {
+      await chrome.storage.local.set({ updateNotify: on });
+    } catch (e) {
+      updateNotifyInput.checked = !on;
+      return;
+    }
+    if (!on) {
+      updateStatusEl.textContent = '已关闭提醒，不会再有网络请求';
+      updateStatusEl.className = 'update-status';
+      updateNotesEl.style.display = 'none';
+      return;
+    }
+    // 打开后由后台的 onChanged 触发一次检查，这里只负责显示「正在检查」
+    updateStatusEl.textContent = '正在检查…（首次需要几秒）';
+    updateStatusEl.className = 'update-status';
+  });
+}
+
+if (updateCheckBtn) {
+  updateCheckBtn.addEventListener('click', async () => {
+    if (updateBusy) return;
+    if (!updateNotifyInput || !updateNotifyInput.checked) {
+      updateStatusEl.textContent = '请先打开上面的「有新版本时提醒我」';
+      updateStatusEl.className = 'update-status err';
+      return;
+    }
+    updateBusy = true;
+    const oldText = updateCheckBtn.textContent;
+    updateCheckBtn.disabled = true;
+    updateCheckBtn.textContent = '检查中…';
+    updateStatusEl.textContent = '正在检查…';
+    updateStatusEl.className = 'update-status';
+
+    const res = await sendBg({ type: 'CHECK_UPDATE', force: true });
+    const s = await chrome.storage.local.get({
+      updateSkipVersion: '', updateLastCheckAt: 0, updateLastError: ''
+    });
+    // disabled 表示后台判断开关没开（理论上进不到这里），此时别把「没有结果」画成「已是最新」
+    const payload = (res && res.ok === true && res.disabled) ? null : res;
+    renderUpdate(payload, s.updateSkipVersion, s.updateLastCheckAt || Date.now(), s.updateLastError);
+
+    updateCheckBtn.disabled = false;
+    updateCheckBtn.textContent = oldText;
+    updateBusy = false;
+  });
+}
+
+if (updateGoBtn) {
+  updateGoBtn.addEventListener('click', async () => {
+    const s = await chrome.storage.local.get({ updateLatest: null });
+    const p = s.updateLatest;
+    const url = (p && p.url) || (typeof WXMD_LINKS !== 'undefined'
+      ? (WXMD_LINKS.homepage || WXMD_LINKS.feedback || '')
+      : '');
+    if (!url) {
+      updateStatusEl.textContent = '更新地址未配置，请到项目主页查看最新版本';
+      updateStatusEl.className = 'update-status err';
+      return;
+    }
+    if (typeof WXMD_openLink === 'function') WXMD_openLink(url);
+    else chrome.tabs.create({ url });
+  });
+}
+
+if (updateSkipBtn) {
+  updateSkipBtn.addEventListener('click', async () => {
+    const s = await chrome.storage.local.get({ updateLatest: null, updateLastCheckAt: 0 });
+    const ver = s.updateLatest && s.updateLatest.latest;
+    if (!ver) return;
+    await sendBg({ type: 'SKIP_UPDATE', version: ver });
+    renderUpdate(s.updateLatest, ver, s.updateLastCheckAt);
+  });
+}
+
+// 后台检查完会写 storage，这里跟着刷新（不用轮询）
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local') return;
+  if (!changes.updateNotify && !changes.updateLatest
+    && !changes.updateSkipVersion && !changes.updateLastError) return;
+  refreshUpdateFromStorage().catch(() => {});
+});
