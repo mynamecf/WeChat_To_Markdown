@@ -693,8 +693,8 @@ if (mainContainer && backToTopBtn) {
 
 // ---------- 可折叠区块（默认收起） ----------
 
-// 「可用变量」「导出位置说明」共用同一套折叠行为，避免两处各写一遍
-[['varToggle', 'varBody'], ['noticeToggle', 'noticeBody']].forEach(pair => {
+// 「可用变量」「导出位置说明」「版本与更新」共用同一套折叠行为，避免三处各写一遍
+[['varToggle', 'varBody'], ['noticeToggle', 'noticeBody'], ['updateToggle', 'updateBody']].forEach(pair => {
   const head = document.getElementById(pair[0]);
   const body = document.getElementById(pair[1]);
   if (!head || !body) return;
@@ -940,6 +940,14 @@ const updateNotesTitle = document.getElementById('updateNotesTitle');
 const updateNotesBody = document.getElementById('updateNotesBody');
 const updateGoBtn = document.getElementById('updateGoBtn');
 const updateSkipBtn = document.getElementById('updateSkipBtn');
+// 卡片默认收起，所以状态要能在这行摘要上看出来：有新版时角标变实心并写版本号
+const updateBadgeEl = document.getElementById('updateBadge');
+
+function setUpdateBadge(text, hot) {
+  if (!updateBadgeEl) return;
+  updateBadgeEl.textContent = text;
+  updateBadgeEl.classList.toggle('hot', !!hot);
+}
 
 function sendBg(message) {
   return new Promise(resolve => {
@@ -974,6 +982,10 @@ function renderUpdate(payload, skipVersion, lastCheckAt, lastError) {
   const current = WXMD_UPDATE.currentVersion();
   updateCurrentEl.textContent = current || '-';
 
+  const notifyOn = !!(updateNotifyInput && updateNotifyInput.checked);
+  // 卡片默认收起，这一行角标就是收起状态下的全部信息，每个分支都要写
+  setUpdateBadge(notifyOn ? '每 24 小时检查' : '未开启检查', false);
+
   const p = payload && payload.ok ? payload : null;
   const status = updateStatusEl;
   const notesOn = (on, title, body, goUrl, showSkip) => {
@@ -992,9 +1004,11 @@ function renderUpdate(payload, skipVersion, lastCheckAt, lastError) {
     if (err) {
       status.textContent = '检查失败：' + err + '（1 小时后会自动重试）';
       status.className = 'update-status err';
+      setUpdateBadge('检查失败', false);
     } else {
       status.textContent = '尚未检查';
       status.className = 'update-status';
+      setUpdateBadge(notifyOn ? '等待检查' : '未开启检查', false);
     }
     notesOn(false);
     return;
@@ -1006,6 +1020,7 @@ function renderUpdate(payload, skipVersion, lastCheckAt, lastError) {
   if (hasUpdate && skipped) {
     status.textContent = '已忽略 v' + p.latest + ' 的提醒，下个版本仍会提示';
     status.className = 'update-status';
+    setUpdateBadge('已忽略 v' + p.latest, false);
     notesOn(false);
     return;
   }
@@ -1013,6 +1028,7 @@ function renderUpdate(payload, skipVersion, lastCheckAt, lastError) {
   if (hasUpdate) {
     status.textContent = '发现新版本 v' + p.latest + (p.published ? '（' + p.published + '）' : '');
     status.className = 'update-status ok';
+    setUpdateBadge('发现新版 v' + p.latest, true);
     notesOn(true, 'v' + p.latest + ' 更新内容',
       p.notes || '（作者未填写更新说明）', p.url, true);
     return;
@@ -1020,6 +1036,7 @@ function renderUpdate(payload, skipVersion, lastCheckAt, lastError) {
 
   status.textContent = '已是最新版本' + (lastCheckAt ? '（上次检查 ' + fmtTime(lastCheckAt) + '）' : '');
   status.className = 'update-status';
+  setUpdateBadge('已是最新', false);
   notesOn(false);
 }
 
@@ -1055,11 +1072,13 @@ if (updateNotifyInput) {
       updateStatusEl.textContent = '已关闭提醒，不会再有网络请求';
       updateStatusEl.className = 'update-status';
       updateNotesEl.style.display = 'none';
+      setUpdateBadge('未开启检查', false);
       return;
     }
     // 打开后由后台的 onChanged 触发一次检查，这里只负责显示「正在检查」
     updateStatusEl.textContent = '正在检查…（首次需要几秒）';
     updateStatusEl.className = 'update-status';
+    setUpdateBadge('正在检查', false);
   });
 }
 
@@ -1077,6 +1096,7 @@ if (updateCheckBtn) {
     updateCheckBtn.textContent = '检查中…';
     updateStatusEl.textContent = '正在检查…';
     updateStatusEl.className = 'update-status';
+    setUpdateBadge('正在检查', false);
 
     const res = await sendBg({ type: 'CHECK_UPDATE', force: true });
     const s = await chrome.storage.local.get({
