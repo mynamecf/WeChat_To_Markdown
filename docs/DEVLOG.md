@@ -490,3 +490,18 @@ BM.链接导出页右下角返回（v16.47.0）：
    - 滚到 809 → `class=back-fab show`、opacity 1、pointer-events auto；
    - 点击调用序列 `get:3 → update:3{active} → windows.update:1{focused} → remove:7`，与左上角入口一致。
 6. 版本 1.16.46.0 → 1.16.47.0。
+
+BN.代码容器误套：图片被吃掉、多行文本变成行内代码（v16.48.0）：
+
+1. 现象一：《我干开发这些年-交易中台篇》里「让业务方可以插入自己的逻辑。」后面那张图没有出现在导出结果里。同一篇的另一张图（alt=信息图）正常，说明不是下载链路的问题。
+2. 定位：把页面在 headless Chrome 里跑一遍导出逻辑，`#js_content` 里只有 4 个 pre、`textLen` 全是 0，其中一个 pre 里嵌着 img。原始 DOM 是 `<pre><code><code><pre><code><pre><code><span><br></span><section><img></section><pre><code><br></code></pre>…` —— 排版器把图片塞进了三层嵌套的代码容器，里面一个字的代码都没有。
+3. 为什么图会丢：Turndown 的 `fencedCodeBlock` 只读 `node.firstChild.textContent`，子节点完全不遍历。于是它既输出一个空围栏（``` 之间什么都没有），又顺手把里面的 img 整块吞掉。更糟的是图片统计在代码块整理之前做（`clone.querySelectorAll('img')` 找得到），所以 `imageList` 里有 4 张、Markdown 里只有 3 个 `{{IMG_n}}` 引用 —— 白下一张没人用的图。
+4. 现象二：「走不同的定制逻辑。」后面那段 if/else 变成一坨看不懂的行内代码。原文是 `<p><span>if (业务线 == "母婴电商") {</span><code><span><br></span><span>走快递履约</span>…</code></p>`，即第一行普通文字、后几行套在 `<code>` 里靠 `<br>` 分行。`rules.code` 的 replacement 里有 `content.replace(/\r?\n|\r/g, ' ')`，换行被压成空格，五行粘成一行再糊一对反引号。作者把它当普通文本写，读者也当普通文本看，不该按代码处理。
+5. 做法（都放 lib/codeblock.js，在 `normalizeEditorPres` 之前跑，顺序不能挪）：
+   - `unwrapEmptyPres()`：`textContent` 去掉空白后为空、且不含 img/table/块级元素的 pre 直接删；带媒体的拆成 div 让媒体回到普通流。真实代码块一定有文字，所以不会误拆。
+   - `unwrapFakeCodes()`：不在 pre 里的 `<code>`，命中「含 img/table/块级元素」「`extractCodeLines` 拆出 ≥2 行」「一行都拆不出来」任一条件，就拆掉标签本身（后两者分别对应「多行文本」和「纯噪音」）。`<br>` 回到段落里，交给 Turndown 的 `lineBreak` 规则输出 `  \n` 硬换行。单行 `<code>foo</code>` 走不到任何一条，行为不变。
+6. 顺带修掉的噪音：每个段落末尾那行「`   `」。它是 `<code><span><br></span></code>` 的产物 —— 没有文字、只有 br，`unwrapFakeCodes` 直接 remove。
+7. 顺序考量：`unwrapEmptyPres` 必须在 `normalizeEditorPres` 之前。反过来先归一编辑器 pre 的话，`extractCodeLines` 会把 img 跳过后返回空数组提前 return，pre 结构原样留着，后面的围栏规则仍然吞图。
+8. 一个取舍：多行文本拆出来后缩进丢了。`&nbsp;` 已还原成普通空格（`normalizeNbsp`，避免 Markdown 里留不可见字符），但 Turndown 输出文本节点时会削掉行首空白，所以 `走快递履约` 不再缩进。Markdown 的段落续行本来也会忽略行首空格，保留无意义，故不为此加硬换行 + 空格的特例。
+9. 验证（真实页面）：同一篇重新导出，图片 3 → 4 张，`{{IMG_1}}` 落在正确位置；空围栏消失；if/else 输出 4 行普通文本（`  \n` 硬换行）；另一篇图片消息（z4ujxr…）导出结果与改动前一致。自动化测试新增 5 项（图片被塞进 pre、空壳 pre、多行 code、单行 code、纯 br code），共 103 项。
+10. 版本 1.16.47.0 → 1.16.48.0。

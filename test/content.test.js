@@ -91,6 +91,52 @@ test('代码块：连续空行与只含空格的行原样保留', async () => {
   assert.ok(body.includes('\n    \n    return a'), '代码块里只含空格的行被清空了:\n' + body);
 });
 
+test('代码块：图片被塞进 <pre><code> 时拆开，图不能丢', async () => {
+  // 排版器把图放进层层嵌套的 pre/code，里面一个字的代码都没有
+  const inner = '<pre><code><pre><code><section>'
+    + '<img data-src="https://mmbiz.qpic.cn/a.png" alt="图片">'
+    + '</section><pre><code><br></code></pre></code></pre></code></pre>';
+  const { body, images } = await render(inner);
+  assert.equal(images.length, 1, '图应该被计进下载列表');
+  assert.match(body, /!\[图片\]\(\{\{IMG_0\}\}\)/, '图片没有被导出:\n' + body);
+  assert.ok(!/```/.test(body), '不该留下空围栏:\n' + body);
+});
+
+test('代码块：空壳 <pre><code> 不留空围栏', async () => {
+  const { body } = await render('<pre><code><br></code></pre><p>正文</p>');
+  assert.ok(!/```/.test(body), '空壳 pre 生成了空围栏:\n' + body);
+  assert.match(body, /正文/);
+});
+
+test('代码块：mdnice 工具栏 + code 的 pre 仍整理成围栏', async () => {
+  const inner = '<pre data-tool="mdnice编辑器">'
+    + '<span style="height:30px;background-image:url(x)"></span>'
+    + '<code><span>const a = 1;</span><span><br></span><span>const b = 2;</span></code>'
+    + '</pre>';
+  const { body } = await render(inner);
+  assert.match(body, /```\nconst a = 1;\nconst b = 2;\n```/, '真代码块被误拆:\n' + body);
+});
+
+test('行内代码：<code> 里多行文字拆成普通文本，不粘成一行', async () => {
+  // 真实文章形态：第一行在 span 里，后几行套在 code 里用 br 分行
+  const inner = '<p><span>if (业务线 == "母婴电商") {</span>'
+    + '<code><span><br></span><span>走快递履约</span><span><br></span><span>}</span></code></p>';
+  const { body } = await render(inner);
+  assert.ok(!/`/.test(body), '多行文字被包成行内代码了:\n' + body);
+  assert.match(body, /if \(业务线 == "母婴电商"\) \{ {2}\n走快递履约 {2}\n\}/, '换行没保留:\n' + JSON.stringify(body));
+});
+
+test('行内代码：单行 <code> 仍然保留反引号', async () => {
+  const { body } = await render('<p>调用 <code>init()</code> 初始化</p>');
+  assert.match(body, /调用 `init\(\)` 初始化/);
+});
+
+test('行内代码：只含 <br> 的空 code 不留「`   `」噪音', async () => {
+  const { body } = await render('<p><span>一段话</span><code><span><br></span></code></p>');
+  assert.ok(!/`/.test(body), '空 code 留下了反引号噪音:\n' + body);
+  assert.match(body, /一段话/);
+});
+
 // ---------- 引用块 / 列表 ----------
 
 test('引用块：带左边框的容器转成 blockquote', async () => {
