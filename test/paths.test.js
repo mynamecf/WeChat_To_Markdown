@@ -48,6 +48,59 @@ test('resolveTemplate：路径模板不再被 100 字符整体截断（会把目
   assert.ok(out.startsWith('微信文章/'));
 });
 
+test('parsePublishedDate：认微信给出的几种原文形态', () => {
+  const ymd = d => d && [d.getFullYear(), d.getMonth() + 1, d.getDate()].join('-');
+  assert.equal(ymd(N.parsePublishedDate('2026年11月16日 10:00')), '2026-11-16');
+  assert.equal(ymd(N.parsePublishedDate('2026年11月16日')), '2026-11-16');
+  assert.equal(ymd(N.parsePublishedDate('2026-11-16 10:00')), '2026-11-16');
+  assert.equal(ymd(N.parsePublishedDate('2026/11/16')), '2026-11-16');
+  assert.equal(ymd(N.parsePublishedDate('2026.11.16 08:05:09')), '2026-11-16');
+  assert.equal(ymd(N.parsePublishedDate('20261116')), '2026-11-16');
+  // 全角数字
+  assert.equal(ymd(N.parsePublishedDate('２０２６年１１月１６日 10:00')), '2026-11-16');
+  // 时分秒也带出来（格式里有 HH:mm 时才看得出来）
+  const t = N.parsePublishedDate('2026年11月16日 10:05:09');
+  assert.equal(t.getHours() * 10000 + t.getMinutes() * 100 + t.getSeconds(), 100509);
+});
+
+test('parsePublishedDate：非法与解析不出的值一律 null，不静默进位', () => {
+  assert.equal(N.parsePublishedDate('2026年2月30日'), null);   // 会被 Date 进位成 3-2
+  assert.equal(N.parsePublishedDate('2026年13月1日'), null);
+  assert.equal(N.parsePublishedDate('昨天'), null);
+  assert.equal(N.parsePublishedDate(''), null);
+  assert.equal(N.parsePublishedDate(null), null);
+});
+
+test('{{published}}：不带格式时保持页面原文（历史行为不变）', () => {
+  const meta = { published: '2026年11月16日 10:00' };
+  assert.equal(N.resolveTemplate('{{published}}', 0, 'u', meta), '2026年11月16日_10_00');
+  // 没取到发布时间就是空，不留字面量
+  assert.equal(N.resolveTemplate('A{{published}}B', 0, 'u', {}), 'AB');
+});
+
+test('{{published:格式}}：YYYYMMDD / YY / MM / DD 都支持', () => {
+  const meta = { published: '2026年11月16日 10:05' };
+  assert.equal(N.resolveTemplate('{{published:YYYYMMDD}}', 0, 'u', meta), '20261116');
+  assert.equal(N.resolveTemplate('{{published:YYMMDD}}', 0, 'u', meta), '261116');
+  assert.equal(N.resolveTemplate('{{published:YYYY-MM-DD}}', 0, 'u', meta), '2026-11-16');
+  assert.equal(N.resolveTemplate('{{published:YY}}', 0, 'u', meta), '26');
+  assert.equal(N.resolveTemplate('{{published:MM}}', 0, 'u', meta), '11');
+  assert.equal(N.resolveTemplate('{{published:DD}}', 0, 'u', meta), '16');
+});
+
+test('{{published:格式}}：原文解析不出时渲染成空串', () => {
+  assert.equal(N.resolveTemplate('前{{published:YYYYMMDD}}后', 0, 'u', { published: '昨天' }), '前后');
+  // 整段只剩空串时走的是 resolveTemplate 既有的兜底（image_N），
+  // 关键是别把 {{published:…}} 当字面量留在名字里
+  assert.equal(N.resolveTemplate('{{published:YYYYMMDD}}', 0, 'u', {}), 'image_0');
+});
+
+test('{{published:格式}}：路径模板里 YYYY/MM 照常分子目录', () => {
+  const out = N.resolveTemplate('{{published:YYYY/MM}}/{{title}}', 0, 'u',
+    { published: '2026-11-16', title: 'T' }, true);
+  assert.equal(out, '2026/11/T');
+});
+
 test('buildImageRef：三种模式的写法', () => {
   assert.equal(N.buildImageRef('relative', 'img', 'a.png', 'note', ''), 'img/a.png');
   assert.equal(N.buildImageRef('note', 'img', 'a.png', 'note', ''), './img/a.png');

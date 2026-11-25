@@ -46,7 +46,22 @@
     .topbar-link:hover { color: var(--brand-green-text); background: var(--brand-green-light); }
     .topbar-sep-v { color: #d1d5db; }
 
-    .container { padding: 20px 24px 40px; max-width: 800px; margin: 0 auto; width: 100%; }
+    /* 右下角返回：滚动之后才浮出来。顶部那个虽然是 sticky 的，
+       但手停在队列底部时还得把页面滚回去，动线太长 */
+    .back-fab {
+      position: fixed; right: 24px; bottom: 24px; z-index: 20;
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 9px 14px; border-radius: 999px;
+      background: #fff; border: 1px solid #e5e7eb; color: #374151;
+      font-family: inherit; font-size: 12.5px; font-weight: 500; cursor: pointer;
+      box-shadow: 0 6px 18px rgba(15, 23, 42, .12);
+      opacity: 0; transform: translateY(8px); pointer-events: none;
+      transition: opacity .18s ease, transform .18s ease, color .15s, background .15s, border-color .15s;
+    }
+    .back-fab.show { opacity: 1; transform: none; pointer-events: auto; }
+    .back-fab:hover { color: var(--brand-green-text); background: var(--brand-green-light); border-color: var(--brand-green-soft); }
+
+    .container { padding: 20px 24px 76px; max-width: 800px; margin: 0 auto; width: 100%; }
 
     .page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
     .page-header h2 { margin: 0 0 4px; font-size: 20px; color: #111827; }
@@ -138,7 +153,8 @@
     .queue-empty { font-size: 12px; color: #9ca3af; padding: 14px 0; text-align: center; }
 
     @media (max-width: 640px) {
-      .container { padding: 16px; }
+      .container { padding: 16px 16px 72px; }
+      .back-fab { right: 16px; bottom: 16px; }
       .queue-kbd { display: none; }
     }
   </style>
@@ -193,6 +209,14 @@
       <div class="queue-list" id="queueList"></div>
     </div>
   </div>
+
+  <button class="back-fab" id="backToOptionsFab" type="button" title="回到配置页（导出在后台继续）">
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <polyline points="15 18 9 12 15 6"></polyline>
+    </svg>
+    返回配置
+  </button>
+
 
   <script src="lib/defaults.js"></script>
   <script src="lib/queue.js"></script>

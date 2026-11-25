@@ -377,6 +377,7 @@ chrome.runtime.onMessage.addListener(msg => {
  * ========================================================================== */
 
 const backToOptionsEl = document.getElementById('backToOptions');
+const backToOptionsFabEl = document.getElementById('backToOptionsFab');
 
 function isPageUrl(url, target) {
   return String(url || '').split('#')[0].split('?')[0] === target;
@@ -390,54 +391,70 @@ function pickOptionsTab(tabs, me, optionsUrl) {
   return list[0] || null;
 }
 
-if (backToOptionsEl) {
-  backToOptionsEl.addEventListener('click', async e => {
-    if (!chrome.tabs || typeof chrome.tabs.query !== 'function'
-      || typeof chrome.tabs.getCurrent !== 'function') return;
-    e.preventDefault();
+/** 顶部文字入口和右下角浮动按钮共用这一份，避免两处逻辑各写一套再慢慢跑偏 */
+async function goBackToOptions(e) {
+  if (!chrome.tabs || typeof chrome.tabs.query !== 'function'
+    || typeof chrome.tabs.getCurrent !== 'function') return;
+  if (e) e.preventDefault();
 
-    const optionsUrl = chrome.runtime.getURL('options.html');
+  const optionsUrl = chrome.runtime.getURL('options.html');
 
-    try {
-      const me = await chrome.tabs.getCurrent();
-      let target = null;
+  try {
+    const me = await chrome.tabs.getCurrent();
+    let target = null;
 
-      // 1) 谁打开的，就回谁那儿去
-      if (me && typeof me.openerTabId === 'number' && typeof chrome.tabs.get === 'function') {
-        try {
-          const opener = await chrome.tabs.get(me.openerTabId);
-          if (opener && isPageUrl(opener.url, optionsUrl)) target = opener;
-        } catch (err) {
-          // 原标签已经被关掉，往下找
-        }
+    // 1) 谁打开的，就回谁那儿去
+    if (me && typeof me.openerTabId === 'number' && typeof chrome.tabs.get === 'function') {
+      try {
+        const opener = await chrome.tabs.get(me.openerTabId);
+        if (opener && isPageUrl(opener.url, optionsUrl)) target = opener;
+      } catch (err) {
+        // 原标签已经被关掉，往下找
       }
-
-      // 2) 退而求其次：任意一个开着的配置页
-      if (!target) {
-        const tabs = await chrome.tabs.query({ url: chrome.runtime.getURL('') + '*' });
-        target = pickOptionsTab(tabs, me, optionsUrl);
-      }
-
-      if (target) {
-        await chrome.tabs.update(target.id, { active: true });
-        // 配置页可能在另一个窗口，焦点也要跟过去，否则只是切了标签没切窗口
-        if (typeof target.windowId === 'number' && chrome.windows && chrome.windows.update) {
-          await chrome.windows.update(target.windowId, { focused: true });
-        }
-        if (me && typeof me.id === 'number') {
-          await chrome.tabs.remove(me.id);
-        } else {
-          window.close();
-        }
-        return;
-      }
-    } catch (err) {
-      // 拿不到标签信息就走下面的原地跳转，不让「返回」变成死按钮
     }
 
-    location.href = 'options.html';
-  });
+    // 2) 退而求其次：任意一个开着的配置页
+    if (!target) {
+      const tabs = await chrome.tabs.query({ url: chrome.runtime.getURL('') + '*' });
+      target = pickOptionsTab(tabs, me, optionsUrl);
+    }
+
+    if (target) {
+      await chrome.tabs.update(target.id, { active: true });
+      // 配置页可能在另一个窗口，焦点也要跟过去，否则只是切了标签没切窗口
+      if (typeof target.windowId === 'number' && chrome.windows && chrome.windows.update) {
+        await chrome.windows.update(target.windowId, { focused: true });
+      }
+      if (me && typeof me.id === 'number') {
+        await chrome.tabs.remove(me.id);
+      } else {
+        window.close();
+      }
+      return;
+    }
+  } catch (err) {
+    // 拿不到标签信息就走下面的原地跳转，不让「返回」变成死按钮
+  }
+
+  location.href = 'options.html';
 }
+
+[backToOptionsEl, backToOptionsFabEl].forEach(el => {
+  if (el) el.addEventListener('click', goBackToOptions);
+});
+
+/**
+ * 右下角那个返回按钮：页面往下滚之后才浮出来。
+ * 顶部那个是 sticky 的，本来就是常驻；这里解决的是「手在队列底部，还得把页面滚回顶部」
+ * 的动线问题，所以不重复显示 —— 回到顶部就收起来。
+ */
+function syncBackFab() {
+  if (!backToOptionsFabEl) return;
+  backToOptionsFabEl.classList.toggle('show', window.scrollY > 160);
+}
+window.addEventListener('scroll', syncBackFab, { passive: true });
+window.addEventListener('resize', syncBackFab);
+syncBackFab();
 
 // 官网 / 问题反馈：地址统一在 lib/defaults.js 里维护，留空自动隐藏
 if (typeof WXMD_mountSiteLinks === 'function') WXMD_mountSiteLinks();

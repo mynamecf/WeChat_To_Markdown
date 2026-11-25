@@ -799,7 +799,7 @@
             可用变量
           </div>
           <div class="var-head-right">
-            <span class="var-badge">14个变量</span>
+            <span class="var-badge">15个变量</span>
             <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
               <polyline points="6 9 12 15 18 9"></polyline>
             </svg>
@@ -820,7 +820,8 @@
               <tbody>
                 <tr><td>{{title}}</td><td>文章标题</td></tr>
                 <tr><td>{{author}}</td><td>公众号名称</td></tr>
-                <tr><td>{{published}}</td><td>文章发布时间</td></tr>
+                <tr><td>{{published}}</td><td>文章发布时间，取页面原文（如 2026年11月16日 10:00）</td></tr>
+                <tr><td>{{published:x}}</td><td>按指定格式输出发布时间（微信只给到分钟），如 {{published:YYYYMMDD}} → 20261116</td></tr>
                 <tr><td>{{url}}</td><td>文章完整链接</td></tr>
                 <tr><td>{{domain}}</td><td>域名 (mp.weixin.qq.com)</td></tr>
                 <tr><td>{{site}}</td><td>站点名 (微信公众号)</td></tr>
@@ -839,10 +840,13 @@
           <div class="format-section">
             <div class="format-title">
               日期格式标记
-              <span>用于 {{date:格式}} 与 {{time:格式}} 中 · 示例时间：2026-10-20 15:30:12.456（周二）</span>
+              <span>用于 {{date:格式}}、{{time:格式}} 与 {{published:格式}} 中 · 示例时间：2026-10-20 15:30:12.456（周二）</span>
             </div>
             <div class="format-hint">
               标记<b>大小写敏感</b>（如 <b>MM</b> 是月份、<b>mm</b> 是分钟）。<b>「补零」</b>表示不足位数时在前补 0，如 5 月显示为 <code>05</code>；<b>「不补零」</b>表示按实际数值显示，如 5 月显示为 <code>5</code>。
+            </div>
+            <div class="format-hint">
+              <b>{{published:格式}}</b> 读的是<b>文章发布时间</b>，微信页面只给到分钟（如 <b>2026年11月16日 10:00</b>），所以 <code>ss</code> / <code>s</code> / <code>SSS</code> 用在它上面会输出 <code>00</code> / <code>0</code> / <code>000</code>；要「导出这一刻」的秒或毫秒请用 {{date:格式}} 或 {{time:格式}}。
             </div>
 
             <div class="format-grid">
