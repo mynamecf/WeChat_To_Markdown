@@ -621,12 +621,15 @@
 
   function updateArticleTitle() {
     try {
-      const titleEl = document.querySelector('#activity-name');
+      // 与导出用的是同一个取标题函数（图片消息 / 新版分享页没有 #activity-name）
       let title = '';
-      if (titleEl && titleEl.innerText.trim()) {
-        title = titleEl.innerText.trim();
+      if (typeof WXMD_pickTitle === 'function') {
+        title = WXMD_pickTitle(document);
       } else {
-        title = document.title.trim().replace(/\s*[-—|]\s*微信公众平台\s*$/, '').trim();
+        const titleEl = document.querySelector('#activity-name');
+        title = titleEl && titleEl.innerText.trim()
+          ? titleEl.innerText.trim()
+          : document.title.trim().replace(/\s*[-—|]\s*微信公众平台\s*$/, '').trim();
       }
       articleNameEl.textContent = title || '未能获取标题';
       articleNameEl.title = title || '';

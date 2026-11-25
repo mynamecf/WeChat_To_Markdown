@@ -387,3 +387,79 @@ AT.Chromium 全系安装包 + 新版本提醒（v16.29.0）：
 11.验证（真实 Chrome + CDP Extensions.loadUnpacked 装载 dist/chromium）：配置页显示当前版本 1.16.29.0、开关默认 false、状态「尚未检查」；页面内直连本地 HTTP 服务验证三条分支（有新版 has=true 且取到 chrome 地址、同版本 has=false、404 返回 error）；写入 updateLatest 后配置页显示「发现新版本 v1.16.30.0（2026-12-01）」+ 两行说明 + 去更新按钮；点忽略后变「已忽略」且说明隐藏；弹窗横幅出现 v1.16.30.0，关开关后消失；后台 alarm 1440 分钟随开关建立/清除，角标 NEW 同步出现/清空，占位地址检查失败只写 lastFailAt、无异常抛出。
 12.测试：新增 test/update.test.js 12 项（版本比较含字典序陷阱、位数补齐、预发布、normalize、有新版本/同版本/更旧、缓存参数拼接、404/非 JSON/缺版本号/抛异常、未配置地址不发请求、顶层 url 写法、成功与失败两套节流），npm test 49 项全绿。
 13.node --check 全部通过（新增 lib/update.js 已加入 npm run check），npm run build 产出 26 个文件 / 194KB zip，Expand-Archive 解压后与源文件逐字节一致。
+BD.顶部信息卡展开不再压住旁边的卡（v16.39.0）：
+1.症状：上一版（BC）的 L 形展开是「内容区宽 200% + 间距，直接铺到旁边那张卡上面」。视觉上两张卡的边框压在一起——旁边那张卡的左边框从展开区里穿出来、展开体右上角被压掉一块。用户反馈「太丑」，并要求展开内容不要与标题栏直接相连、宽度要和其他配置卡一致。
+2.根因：内容区在同一网格行内用 width + 负 margin 溢出，位置只能靠百分比猜；旁边那张卡仍在第 1 行原位，两者必然重叠。z-index 只能决定谁盖谁，不能消除边框穿插。
+3.改法：内容区从「同行溢出、跨两列」改成「另起一行、占满整行」。.top-cards > .notice-card 用 display: contents 退成透明容器，让 .collapsible-head 与 .collapsible-body 各自作为 grid item：head 在第 1 行（col 1 / col 2 / nav col 3），body 在第 2 行 `grid-column: 1 / -1`。宽度交给网格算，与下方配置卡左右边界一致（实测都是 216–968，752px）。
+4.间距：去掉上一版的 `margin-top: -16px`，直接用 row-gap 的 16px。body 恢复完整圆角和四边框，成为一张独立的卡；head 也不再让出底边，收起/展开都是完整圆角。
+5.删掉的临时代码：body 的 `::before` 顶边补线、head 展开态的 `border-bottom-color: transparent` 与下圆角清零、兄弟卡的 .dim 类（原来用来去掉下圆角）——不再需要，全部移除。
+6.展开反馈：`.top-cards > .notice-card.open > .collapsible-head` 描边改为 --brand-green，收起后恢复，保证「点开的是哪张」和下面弹块对得上。
+7.互斥：两张卡的 body 都在同一个网格格里，同时展开会叠在一起。折叠逻辑保留 TOP_CARD_HEAD 映射，展开前先把另一张收起（上一版允许同时展开）。
+8.窄屏：≤900px 仍走单列，卡本体恢复 display: block，body 用 margin-top: 12px 与标题卡分开。
+9.验证（headless Chrome + chrome API stub）：左/右展开时 body 都是 [216, 968, 752]，与紧随其后的配置卡矩形完全一致；收起态 body 不占位；三块头部 282/282/156 等高；820px 单列正常无溢出。
+10.顺带：head padding 14/16，body padding 16/20/18，阴影 `0 14px 30px -10px`，版本 1.16.38.0 → 1.16.39.0。
+BE.顶部三条信息改成同一张卡里的分组行（v16.40.0）：
+1.症状：BD 版把两个标题栏并排放在第 1 行、展开内容横跨整行放在第 2 行。缝没有了、宽度也全宽了，但「归属」看着别扭——整宽面板压在两个标题栏下面，既不属于左边也不属于右边；面板右上角还悬着另一张不相干的卡（截图里两块红色区域就是这两处）。
+2.根因：两列布局 + 单列面板本身就是几何冲突。只要标题栏是「半宽并排」，而内容区是「整宽」，两者之间必然有一段对不上的边界；靠 margin / 负位移 / 圆角补丁只能糊，糊不平。
+3.改法：放弃并排。整个顶部区域收成**一张卡里的三行**：`.top-cards` 变成普通卡（白底 + 12px 圆角 + 1px 边），内部 `.notice-card` 退成透明容器（display 从 contents 改回 block，padding/border/background/radius 全部清零），head 与 body 都变成行内元素。
+4.CSS 全部从「网格 + 跨列」改成「纵向列表」：删掉 grid-template-columns / grid-row / grid-column / nth-child 定位 / 200% 宽度 / 负位移 / ::before 补线；新增 `.top-cards > * + *` 的行间发丝线（#f0f2f4）、head 的 hover 与 open 态背景（#F7FDFA）、body 的左缩进 26px（图标 18 + gap 8，正好对齐标题文字）。
+5.展开态即「整行浅绿带」：head 与 body 同为 #F7FDFA、body 的 margin-top 归零（覆盖 `.notice-card .collapsible-body` 的 12px），标题和内容视觉上连成一块，但仍能看出是哪一行展开的。
+6.导航行（链接导出）从竖排小卡改成标准列表行：logo + 标题在左，进度角标 + 箭头在右；hover 时整行浅绿、箭头右移 2px 并变绿。HTML 里 `.nav-top` 包裹层拆成 `.nav-left` / `.nav-right`。
+7.角标（var-badge）在 `.top-cards` 内改成浅绿胶囊（--brand-green-light + 透明边），白底行上不再像一块浮起来的白片。
+8.交互仍为手风琴：`.open` 同时记在 head 与 .notice-card 上（描边/背景用），互斥逻辑保留在 options.js 的 TOP_CARD_HEAD；上一版的 .dim（去下圆角）已随之删除，无需再改。
+9.窄屏（≤900px）：结构不变，只把 head/body/nav 的左右 padding 收到 15px、body 左缩进收平（44 → 15），避免小屏上正文被挤成窄条。顺手修掉 560px 下底部「恢复默认」被压成两行：`.footer-actions` 加 flex:0 0 auto，按钮加 white-space:nowrap。
+10.验证（headless Chrome + chrome API stub，1000px 与 560px 两种宽度）：分组外框 [116, 868, 752] 与下方「保留在线链接配置」卡片矩形完全一致；三行分别 750×50 / 750×50 / 750×49（含 1px 分隔线等高）；展开体 750×223（说明）/ 750×209（更新），左右边界与卡片内边缘对齐，窄屏无溢出、无截断；点击顺序 open1 → open2 → close2 → open1b，最终只有一行带 open 类，无残留 .dim。版本 1.16.39.0 → 1.16.40.0。
+BF.「返回配置」不再原地再开一个配置页（v16.41.0）：
+1.症状：链接导出页是 target=_blank 打开的新标签，左上角「返回配置」是 `<a href="options.html">`。点下去是在当前标签里导航到配置页——于是浏览器里出现第二个配置页，用户原来那个还留在后台，感觉「返回」没回到原处。
+2.根因：普通链接无法表达「回到来源标签」。新标签的返回语义需要 tabs API：找到来源 tab、激活它、再关掉自己。
+3.做法（queue.js）：click 事件里 preventDefault，然后按优先级找目标 tab——(a) `tabs.getCurrent()` 拿到的 openerTabId 对应的标签，且它的 URL 是配置页；(b) 任意一个 URL 是配置页的标签，按「当前可见 → lastAccessed 最近」排序取第一个。命中后 `tabs.update({active:true})`、`windows.update({focused:true})`、`tabs.remove(自己)`。两条都不命中才 `location.href='options.html'`，保留手输地址打开时的可用性。
+4.让 (a) 成立：options.js 点「链接导出」时改用 `chrome.tabs.create({ url, openerTabId: 当前标签 })`，不再依赖 `<a target="_blank">` 的隐式关系（JS 读不到）。
+5.顺手治理多开：点入口时先 `tabs.query` 扩展页面，已经有队列页就 `tabs.update` 切过去而不是再开一个；查询/创建都不可用时（老环境、测试桩）在 handler 开头直接 return，保留 `<a>` 的默认行为。
+6.防死按钮：两处都包在 try/catch 里，异常走兜底（原地跳转 / window.open），不会点了没反应。
+7.验证（headless Chrome 加载真实的 queue.js / options.js + chrome API stub，记录调用序列）：
+   - 有 opener：`getCurrent → get:3 → update:3(active) → windows.update:1 → remove:7`，没有多余 query；
+   - opener 已关、仍有配置页：`getCurrent → query → update:3 → windows.update:1 → remove:7`；
+   - 配置页全关：原地导航到 options.html（页面标题变为「详细配置」）；
+   - 入口点击：已有队列页时 `query → update:9`，没有时 `query → getCurrent → create opener=5`。
+8.版本 1.16.40.0 → 1.16.41.0。
+BG.两块低频信息挪到页面底部（v16.42.0）：
+1.动机：BE 版把「导出位置说明 / 版本与更新 / 链接导出」塞进首屏同一张卡。首屏一行三块看着整齐，但「版本与更新」「链接导出」其实很少点，且与「导出与命名规则」无关，占着最贵的位置。
+2.改法：`.top-cards` 拆成两处组卡——顶部只留「导出位置说明」一行；「版本与更新」卡与「链接导出」行整体搬到 `.layout` 末尾，紧跟「可用变量」卡之后，共用 `.row-group` 样式（选择器由 .top-cards 全量改名，样式一行没改）。
+3.互斥取消：原来两张卡共用一个展开位，才需要手风琴互斥；现在两块分处首尾，隔好几屏，自动收起对方只会让人莫名其妙。options.js 里删掉 TOP_CARD_HEAD 映射与「展开前先收起另一张」的分支，只留最朴素的 toggle。
+4.结构校验：`row-group` 计数 2；顶部组 1 行、高 52；底部组 2 行、高 101；底部组 top≈1643（容器滚动区内），前面紧邻「可用变量」卡。
+5.截图核对（headless Chrome + chrome API stub，1000×880）：顶部单行卡、展开态；底部两行卡收起与展开态；行间发丝线、展开区浅绿带、正文缩进 44px 均正常，底部栏不遮挡（容器内滚动）。
+6.版本 1.16.41.0 → 1.16.42.0。
+BH.弹窗底部链接行上下等距（v16.43.0）：
+1.症状：弹窗底部「官网 / 问题反馈」一行看着"下面空一块"。量出来文字上方 10px、下方 16px，且这一行带了 margin-top:-2px 与 padding-top:4px，本来是为了"压紧"，实际只是把上方挤紧、下方不动。
+2.改法：(a) `.footer-links` 去掉 `margin:-2px 0 0` 与 `padding-top:4px`，改成 0；(b) `.app-container` 的 padding 由 `16px` 改成 `16px 16px 8px`，只有底边变薄。上方间距继续由 `.actions` 的 gap:8px 提供，下方由容器底内边距提供，两侧都是 8px。
+3.为什么不给 footer 加负 margin-bottom：`.actions` 的负外边距会与 `#status` 的 `margin-top:8px` 折叠，状态文案出现时会贴到链接行上。改容器内边距没有这个问题。
+4.实测（headless Chrome + chrome API stub，352px 宽）：链接盒 [462,480] 高 18，容器底 488 → 上 8 / 下 8；容器总高 498 → 488，弹窗矮 10px。带状态文案时 footer→status 8、status→底边 8。
+5.版本 1.16.42.0 → 1.16.43.0。
+BI.标题按模板取，别再只认 #activity-name（v16.44.0）：
+1.症状：用户反馈 https://mp.weixin.qq.com/s/z4ujxrVatZ7kK_iAb6Ev5Q 导出后没有标题。正文、图片都正常，只有标题丢。
+2.定位：抓该页（curl 2.9MB + headless Chrome 各一份）确认是「新版分享页」：body 带 page_share_img，容器 #js_base_container.share_content_page_bd，正文 #js_content > #js_image_content.image_content；标题只在 <h1 class="rich_media_title">，全页 0 个 #activity-name。原始 HTML 的 <title> 只有换行，由页面脚本 __setTitle(showTitle, itemShowType) 渲染后才写入；head 里已有服务端给的 og:title。
+3.根因：旧逻辑是 `#activity-name → document.title`。这类页面第一档没有、第二档在注入时可能还是空串（<title> 空、由脚本后写），于是标题为空，而正文因为 #js_content 已渲染所以导出"成功"——症状看起来像标题识别问题，其实是模板差异。
+4.做法：lib/defaults.js 新增 WXMD_pickTitle(doc)，按 #activity-name → h1.rich_media_title → #js_text_title → #js_video_page_title → #js_audio_title → .rich_media_title → meta[og:title]/twitter:title → document.title（剥「微信公众平台」后缀）取第一个非空；文本统一 \s+ 折叠。用 textContent 而不是 innerText：后台标签页没有布局，innerText 可能算不出来。
+5.调用点统一：content.js（YAML / {{title}} / 文件名）、floating.js（浮窗标题）、popup.js（弹窗「当前文档」的标题，注入函数里 typeof 判断，页面未注入 lib 时回退旧逻辑）。content.js 的 TITLE_SELECTOR 只留在降级分支里。
+6.验证：把真实页面 dump 到本地（.tmp，已清理），在 headless Chrome 里按 injectlist 顺序加载真实 lib + content.js。三种变体各跑一次：原样 → 取 document.title；清空 <title> → 取 h1；再删掉 h1 → 取 og:title；都得到「5GB永久免费虚拟主机，不绑卡不限流量」，YAML title 同步。test/content.test.js 新增 5 项（h1 兜底、og:title、document.title 去后缀、优先级、js_*_title），88 项全绿。
+7.顺带记一笔：队列列表在跑完之前显示的是链接尾巴（queue.js 的 shortUrl），不是标题，容易被当成「标题没识别」。
+8.版本 1.16.43.0 → 1.16.44.0。
+BJ.链接导出图片消息取不到图 / 队列限流提示（v16.45.0）：
+1.症状：https://mp.weixin.qq.com/s/z4ujxrVatZ7kK_iAb6Ev5Q 用浮窗导出有 15 张图，用「链接导出」跑出来 0 张。
+2.定位（headless Chrome + CDP，同一页面两种标签状态）：
+   - 前台与后台标签的 `#img_list` 都只挂 **1** 个 `.swiper_item`，且是 `<div class="swiper_item">` 空壳（无 data-src，内层 img 是 `tp=webp&usePicPrefetch=1` 的副本）；
+   - `window.cgiDataNew.picture_page_info_list` 稳定 15 条（`item_show_type=8` 即图片消息），`window.picture_page_info_list` 被 `slice(0,20)` 截过；
+   - 用真实 DOM 跑 content.js：前台 dump 能取 15 张（--virtual-time-budget 把轮播推完了），后台标签 0 张。
+   结论：轮播是虚拟渲染，能拿几张取决于视口与渲染进度，不能当数据源；BI 条修的是同一根因的另一面（标题也只有脚本渲染后才写进 <title>）。
+3.难点：全量图集在页面全局，而 `chrome.scripting.executeScript` 注入的 content.js 跑在 isolated world，`window.cgiDataNew` 读到的是 undefined。
+4.做法：background 的 `bridgePictureList(tabId)` 在 waitTabComplete 之后、注入 content.js 之前，用 `world:'MAIN'` + `func` 读一次图集，去重（按 path）后写进 `<html data-wxmd-pics>`。只在确认是图片消息时才写（`item_show_type === 8` 或页面有 `#js_image_content / #js_image_desc`），避免普通图文里万一带了同名列表被硬塞进正文。lib/imagepost.js 的 `takeBridged()` 读该属性、读完立即删除，`prepare()` 里 `bridged.length ? bridged : collectUrls(doc)`。DETECT_SEL 判定也放宽成「有桥数据就不再要求 DOM 锚点」——后台标签连 `#js_image_content` 都可能还没挂上。注入失败（老浏览器 / 页面拒绝）整段 catch 掉，退回原来的 DOM 采集。浮窗/弹窗那条注入路径也调一次，两条入口取图一致。
+5.地址清洗：页面里存的是被转义的 `&amp;`，桥的两侧都还原一次（background 写入前、imagepost 读取后），否则下载 404。
+6.验证（后台标签 `background:true`，真实页面 + 真实 lib + content.js）：
+   - 无桥：success true / images 0 / md 1005 字节；
+   - 有桥：bridged 15 / images 15 / md 1250 字节且含 `![](...)`，正文仍在图片之前；
+   - 图集桥读完即删：`documentElement.getAttribute('data-wxmd-pics')` 为 null（新增单测覆盖）。
+7.队列上限：`MAX_ITEMS` 50 → 5000（防误贴硬顶，非业务上限），跳过原因改成「一次最多 5000 条，请先清空已完成的」；新增 `RISK_WARN_ITEMS = 200`，queue.js 用同一常量（queue.html 补引入 lib/queue.js，避免两份阈值）。
+8.提示交互：待导出（queued + running + 本次新增）> 200 时 `confirm` 一次，取消则中止；`renderQueue` 在总数 > 200 时显示常驻橙色提醒。用待导出数而不是 total，续跑不会被已完成的历史条目反复弹窗。
+9.耗时口径更正：10s/篇 × 500 ≈ 1.4 小时（用户算法正确）。此前给 2–3 小时是按 15–20s/篇的保守值。实测单篇加载 0.3–2s（缓存命中 0.3s 级）、图片并发 4 张/轮，常见文章 3–8s，500 篇顺跑约 40–70 分钟；唯一不可控项是加载超时（20s）后的重试。
+10.测试：test/queue.test.js 上限用例拆成「300 条全进」+「硬顶拒绝」两项；test/content.test.js 新增「轮播只渲染 1 项时用图集桥取全 15 张」「桥读完即删」，helpers.render 支持 `opts.htmlAttrs`。91 项全绿。
+11.版本 1.16.44.0 → 1.16.45.0。

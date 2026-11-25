@@ -20,7 +20,8 @@ const STAGE = path.join(DIST, 'chromium');
 
 // 只打扩展运行必需的文件；version.json / test / tools / node_modules 都不能进包
 const INCLUDE = ['manifest.json', 'background.js', 'content.js', 'floating.js',
-  'popup.html', 'popup.js', 'options.html', 'options.js', 'lib', 'icons'];
+  'popup.html', 'popup.js', 'options.html', 'options.js',
+  'queue.html', 'queue.js', 'lib', 'icons'];
 
 function fail(msg) {
   console.error('✗ ' + msg);

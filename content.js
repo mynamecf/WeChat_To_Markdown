@@ -140,10 +140,14 @@
 
   // ---------- 文章元数据 ----------
 
-  const titleEl = document.querySelector(TITLE_SELECTOR);
-  const title = titleEl && titleEl.innerText.trim()
-    ? titleEl.innerText.trim()
-    : document.title.trim();
+  // 标题来源不止 #activity-name：图片消息 / 新版分享页只有 h1.rich_media_title，
+  // 视频号 / 文字消息又各有一套节点，统一交给 lib/defaults.js 的 WXMD_pickTitle。
+  const title = (typeof WXMD_pickTitle === 'function')
+    ? WXMD_pickTitle(document)
+    : (() => {
+        const el = document.querySelector(TITLE_SELECTOR);
+        return (el && el.innerText.trim()) || document.title.trim();
+      })();
 
   const authorEl = document.querySelector(AUTHOR_SELECTOR);
   const author = authorEl ? authorEl.innerText.trim() : '';

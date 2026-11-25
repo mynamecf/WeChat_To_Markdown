@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>链接导出 - 微信文章转 Markdown</title>
+  <style>
+    :root {
+      /* 与 options.html / popup.html 同一套品牌色 */
+      --brand-green: #07C160;
+      --brand-green-dark: #06AD56;
+      --brand-green-light: #E6F9F0;
+      --brand-green-soft: #B7ECD1;
+      --brand-green-text: #0A7A42;
+      --brand-green-rgb: 7, 193, 96;
+    }
+
+    * { box-sizing: border-box; }
+    ::-webkit-scrollbar { width: 10px; height: 10px; }
+    ::-webkit-scrollbar-thumb { background: #d8dde3; border-radius: 10px; border: 3px solid transparent; background-clip: content-box; }
+    ::-webkit-scrollbar-thumb:hover { background: #c3cad3; background-clip: content-box; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      margin: 0; padding: 0; background: #f9fafb; color: #1f2937; font-size: 13px;
+      display: flex; flex-direction: column; min-height: 100vh;
+    }
+
+    .topbar {
+      background: #fff; padding: 12px 24px; border-bottom: 1px solid #e5e7eb;
+      display: flex; align-items: center; justify-content: space-between;
+      position: sticky; top: 0; z-index: 10;
+    }
+    .topbar-left { display: flex; align-items: center; gap: 12px; font-size: 15px; font-weight: 600; }
+    .back-link {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 12.5px; font-weight: 500; color: #4b5563; text-decoration: none;
+      padding: 4px 9px; border-radius: 6px; transition: all .15s;
+    }
+    .back-link:hover { color: var(--brand-green-text); background: var(--brand-green-light); }
+    .topbar-sep { color: #e5e7eb; }
+    .topbar-right { display: flex; align-items: center; gap: 2px; font-size: 12.5px; }
+    .topbar-link {
+      color: #4b5563; font-weight: 500; text-decoration: none; padding: 4px 9px; border-radius: 6px;
+      transition: all .15s; cursor: pointer; white-space: nowrap;
+    }
+    .topbar-link:hover { color: var(--brand-green-text); background: var(--brand-green-light); }
+    .topbar-sep-v { color: #d1d5db; }
+
+    .container { padding: 20px 24px 40px; max-width: 800px; margin: 0 auto; width: 100%; }
+
+    .page-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 16px; }
+    .page-header h2 { margin: 0 0 4px; font-size: 20px; color: #111827; }
+    .page-header p { margin: 0; color: #6b7280; font-size: 13px; }
+    .head-badge {
+      flex: 0 0 auto; margin-top: 4px;
+      font-size: 11.5px; color: #6b7280; background: #fff;
+      border: 1px solid #e5e7eb; border-radius: 12px; padding: 3px 10px;
+      white-space: nowrap;
+    }
+    .head-badge.hot { background: var(--brand-green); border-color: var(--brand-green); color: #fff; }
+
+    .card {
+      background: #fff; border: 1px solid #e5e7eb; border-radius: 12px;
+      padding: 20px; box-shadow: 0 1px 3px rgba(0, 0, 0, .02);
+    }
+    .panel-desc { margin: 0 0 12px; font-size: 12px; color: #4b5563; line-height: 1.75; }
+    .panel-desc b { color: #111827; }
+
+    .queue-input {
+      width: 100%; resize: vertical;
+      min-height: 96px; padding: 10px 12px;
+      font-family: inherit; font-size: 12.5px; line-height: 1.6; color: #374151;
+      border: 1px solid #e5e7eb; border-radius: 8px; background: #fff;
+      outline: none; transition: border-color .15s, box-shadow .15s;
+    }
+    .queue-input::placeholder { color: #9ca3af; }
+    .queue-input:focus {
+      border-color: var(--brand-green);
+      box-shadow: 0 0 0 3px rgba(var(--brand-green-rgb), .12);
+    }
+
+    .queue-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 10px; }
+    .queue-actions button { padding: 7px 14px; font-size: 12.5px; }
+    .queue-actions button:disabled { opacity: .5; cursor: not-allowed; }
+    button.btn-primary {
+      background: var(--brand-green); border: none; border-radius: 6px; color: #fff;
+      cursor: pointer; transition: background .2s;
+    }
+    button.btn-primary:hover:not(:disabled) { background: var(--brand-green-dark); }
+    button.btn-secondary {
+      background: #fff; border: 1px solid #d1d5db; border-radius: 6px; color: #374151; cursor: pointer;
+    }
+    button.btn-secondary:hover:not(:disabled) { background: #f9fafb; }
+    .queue-kbd {
+      margin-left: auto; font-size: 11px; color: #9ca3af;
+      font-family: ui-monospace, monospace;
+    }
+
+    .queue-status { font-size: 12px; color: #6b7280; margin-top: 10px; line-height: 1.6; }
+    .queue-status.ok { color: var(--brand-green-text); }
+    .queue-status.err { color: #b91c1c; }
+    /* 超过风控阈值时的常驻提醒：浅橙底，不抢主按钮的视觉 */
+    .queue-warn {
+      margin-top: 8px; padding: 8px 11px; border-radius: 8px;
+      background: #FFF7ED; border: 1px solid #FED7AA; color: #B45309;
+      font-size: 11.5px; line-height: 1.65;
+    }
+
+    .queue-list { margin-top: 12px; border-top: 1px solid #f3f4f6; }
+    .queue-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 9px 0; border-bottom: 1px solid #f3f4f6;
+      font-size: 12px; color: #374151;
+    }
+    .queue-dot { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: #d1d5db; }
+    .queue-item.running .queue-dot { background: var(--brand-green); animation: queuePulse 1.2s ease-in-out infinite; }
+    .queue-item.done .queue-dot { background: var(--brand-green-dark); }
+    .queue-item.failed .queue-dot { background: #b91c1c; }
+    @keyframes queuePulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+
+    .queue-name { flex: 1 1 auto; min-width: 0; }
+    .queue-label, .queue-sub { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .queue-sub { font-size: 11px; color: #9ca3af; }
+    .queue-item.failed .queue-name { color: #b91c1c; }
+    .queue-tag {
+      flex: 0 0 auto; font-size: 11px; color: #6b7280;
+      padding: 1px 8px; border-radius: 10px; background: #f3f4f6;
+    }
+    .queue-item.running .queue-tag,
+    .queue-item.done .queue-tag { background: var(--brand-green-light); color: var(--brand-green-text); }
+    .queue-item.failed .queue-tag { background: #fef2f2; color: #b91c1c; }
+    .queue-op {
+      flex: 0 0 auto; border: none; background: none; cursor: pointer;
+      font-size: 11px; color: #6b7280; padding: 2px 5px; border-radius: 4px;
+    }
+    .queue-op:hover { color: var(--brand-green-text); background: var(--brand-green-light); }
+    .queue-op.del:hover { color: #b91c1c; background: #fef2f2; }
+    .queue-empty { font-size: 12px; color: #9ca3af; padding: 14px 0; text-align: center; }
+
+    @media (max-width: 640px) {
+      .container { padding: 16px; }
+      .queue-kbd { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="topbar-left">
+      <a class="back-link" id="backToOptions" href="options.html">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="15 18 9 12 15 6"></polyline>
+        </svg>
+        返回配置
+      </a>
+      <span class="topbar-sep">|</span>
+      链接导出
+    </div>
+    <div class="topbar-right">
+      <a class="topbar-link" id="linkHomepage" href="#" target="_blank" rel="noopener noreferrer" style="display:none;">官网</a>
+      <span class="topbar-sep-v" id="linkHomepageSep" style="display:none;">|</span>
+      <a class="topbar-link" id="linkFeedback" href="#" target="_blank" rel="noopener noreferrer" style="display:none;">问题反馈</a>
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="page-header">
+      <div>
+        <h2>按链接批量导出</h2>
+        <p>粘贴公众号文章链接，一行一条，按顺序逐条导出</p>
+      </div>
+      <span class="head-badge" id="queueBadge">未开始</span>
+    </div>
+
+    <div class="card">
+      <p class="panel-desc">
+        粘贴后点<b>「开始导出」</b>即可，不需要先入队再点开始。多条按顺序逐条跑，
+        <b>每条都会在后台标签页里打开</b>，导完立即关闭；关掉本页面队列也会继续跑。
+        导出用的是配置页当前选中的「保留在线链接 / 下载到本地」模式。
+      </p>
+
+      <textarea class="queue-input" id="queueInput" rows="4" spellcheck="false"
+        placeholder="https://mp.weixin.qq.com/s/...&#10;https://mp.weixin.qq.com/s/..."></textarea>
+
+      <div class="queue-actions">
+        <button class="btn-primary" id="queueRunBtn" type="button">开始导出</button>
+        <button class="btn-secondary" id="queuePauseBtn" type="button">暂停</button>
+        <button class="btn-secondary" id="queueClearBtn" type="button">清空已完成</button>
+        <span class="queue-kbd">Ctrl + Enter 直接开始</span>
+      </div>
+
+      <div class="queue-status" id="queueStatus">队列为空</div>
+      <div class="queue-warn" id="queueWarn" hidden></div>
+      <div class="queue-list" id="queueList"></div>
+    </div>
+  </div>
+
+  <script src="lib/defaults.js"></script>
+  <script src="lib/queue.js"></script>
+  <script src="queue.js"></script>
+</body>
+</html>

@@ -28,7 +28,9 @@
     }
 
     .app-container {
-      padding: 16px;
+      /* 底部只留 8px：最后一行是官网/问题反馈，底边不用跟左右一样厚，
+         否则弹窗底下会空出一块，整体偏松 */
+      padding: 16px 16px 8px;
       background: #ffffff;
     }
 
@@ -146,10 +148,12 @@
     .options-link:hover { color: #374151; background: #f9fafb; }
 
     /* 官网 / 问题反馈（地址统一在 lib/defaults.js 的 WXMD_LINKS 里改）
-       压在按钮下方的一条窄行：不要额外上下留白，别把弹窗撑高 */
+       一行窄链接：与上方「详细配置」的间距、到弹窗底边的间距都取 8px，
+       上下等距且不留多余空白，不为这一行额外撑高弹窗 */
     .footer-links {
       display: flex; align-items: center; justify-content: center; gap: 2px;
-      margin: -2px 0 0; padding-top: 4px;
+      margin: 0; padding: 0;
+      /* 行高与链接内边距合起来 18px，上下各 8px，整块 34px */
     }
     .footer-link {
       display: inline-flex; align-items: center; gap: 4px; padding: 1px 7px; border-radius: 5px;

@@ -113,8 +113,11 @@ async function init() {
         {
           target: { tabId: tab.id },
           func: () => {
+            // 页面里已注入 lib/defaults.js（content_scripts），优先用统一实现：
+            // 图片消息 / 新版分享页没有 #activity-name，标题只在 h1.rich_media_title 里
+            if (typeof WXMD_pickTitle === 'function') return WXMD_pickTitle(document);
             const el = document.querySelector('#activity-name');
-            return el ? el.innerText.trim() : document.title.trim();
+            return (el && el.innerText.trim()) || document.title.trim();
           }
         },
         results => {

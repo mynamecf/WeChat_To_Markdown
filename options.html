@@ -331,7 +331,9 @@
 
     .footer { background: #fff; border-top: 1px solid #e5e7eb; padding: 10px 24px; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; z-index: 10; }
     .footer-text { color: #6b7280; font-size: 12px; }
-    .footer-actions { display: flex; gap: 12px; }
+    .footer-actions { display: flex; gap: 12px; flex: 0 0 auto; }
+    /* 窄屏别把按钮压断成两行 */
+    .footer-actions button { white-space: nowrap; }
     button.btn-secondary { padding: 8px 16px; background: #fff; border: 1px solid #d1d5db; border-radius: 6px; color: #374151; font-size: 13px; cursor: pointer; }
     button.btn-secondary:hover { background: #f9fafb; }
     button.btn-primary {
@@ -440,6 +442,82 @@
     .update-divider { height: 1px; background: var(--brand-green-soft); margin: 12px 0; }
     /* 有新版时折叠标题上的角标变实心，收起状态下也能一眼看到 */
     .notice-card .var-badge.hot { background: var(--brand-green); border-color: var(--brand-green); color: #fff; }
+
+    /* 分组列表：一张卡里若干行，点哪一行就在该行正下方展开，展开宽度天然等于整行，
+       不会出现「两个标题栏配一个大面板」的错位。设置页常见做法。
+       页面上共两处：顶部「导出位置说明」；底部「版本与更新 + 链接导出」。 */
+    .row-group {
+      background: #fff;
+      border: 1px solid #e5e7eb;
+      border-radius: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.02);
+      overflow: hidden;
+    }
+    /* 行本体退成透明容器，外观交给 head / body / nav-card 各自绘制 */
+    .row-group > .notice-card {
+      padding: 0;
+      background: transparent;
+      border: none;
+      border-radius: 0;
+      box-shadow: none;
+    }
+    /* 行与行之间一条发丝线，行内不画线 */
+    .row-group > * + * { border-top: 1px solid #f0f2f4; }
+
+    .row-group > .notice-card > .collapsible-head {
+      padding: 14px 18px;
+      transition: background .18s ease;
+    }
+    .row-group > .notice-card > .collapsible-head:hover { background: #F7FDFA; }
+    /* 展开的那一行整行铺浅绿，标题与内容连成一块，看得出是同一组 */
+    .row-group > .notice-card.open > .collapsible-head { background: #F7FDFA; }
+    .row-group > .notice-card.open .chevron { color: var(--brand-green); }
+    .row-group > .notice-card > .collapsible-body {
+      margin-top: 0;
+      /* 左缩进 26px，正文正好对齐标题文字（图标 18 + 间距 8） */
+      padding: 0 18px 16px 44px;
+      background: #F7FDFA;
+    }
+    /* 白底行上的角标换成浅绿胶囊，别用白底浮在白卡上 */
+    .row-group > .notice-card .var-badge {
+      background: var(--brand-green-light);
+      border-color: transparent;
+    }
+
+    /* 第三行：进入独立的链接导出页 */
+    .row-group > .nav-card {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 14px 18px;
+      background: #fff;
+      color: var(--brand-green-text);
+      font-size: 14px; font-weight: 600;
+      text-decoration: none; cursor: pointer;
+      transition: background .18s ease;
+    }
+    .row-group > .nav-card:hover { background: #F7FDFA; }
+    .row-group > .nav-card .nav-left { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .row-group > .nav-card .nav-left span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .row-group > .nav-card svg { flex: 0 0 auto; color: var(--brand-green); }
+    .row-group > .nav-card .nav-right { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+    .row-group > .nav-card .nav-arrow { color: #9ca3af; transition: transform .18s ease, color .18s ease; }
+    .row-group > .nav-card:hover .nav-arrow { color: var(--brand-green); transform: translateX(2px); }
+    /* 队列进度：就挂在标题右边，不点进去也能看到 */
+    .row-group > .nav-card .nav-sub {
+      font-size: 11px; font-weight: normal; color: #6b7280;
+      padding: 2px 8px; border-radius: 12px; background: #f3f4f6;
+      max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .row-group > .nav-card .nav-sub.hot {
+      color: var(--brand-green-text); background: var(--brand-green-light); font-weight: 600;
+    }
+
+    /* 窄屏：正文缩进收回来，行内左右留白略减 */
+    @media (max-width: 900px) {
+      .row-group > .notice-card > .collapsible-head { padding: 13px 15px; }
+      .row-group > .notice-card > .collapsible-body { padding: 0 15px 14px 15px; }
+      .row-group > .nav-card { padding: 13px 15px; }
+    }
+
   </style>
 </head>
 <body>
@@ -461,100 +539,45 @@
     </div>
 
     <div class="layout">
-      <!-- 导出位置说明（可折叠，默认收起） -->
-      <div class="card notice-card">
-        <div class="collapsible-head" id="noticeToggle">
-          <div class="var-header-left">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path>
-              <circle cx="12" cy="10" r="3"></circle>
-            </svg>
-            导出位置说明
-            <span class="var-badge">浏览器下载目录</span>
-          </div>
-          <div class="var-header-right">
-            <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="6 9 12 15 18 9"></polyline>
-            </svg>
-          </div>
-        </div>
-        <div class="collapsible-body" id="noticeBody" style="display:none;">
-          <div class="notice-body">
-            <p>
-              所有文件都保存在 <b>浏览器的默认下载目录</b> 下。扩展读不到这个设置，只能用「最近一次导出的实际落盘位置」反推出来，结果如下（点一下可整段选中复制）：
-            </p>
-            <div class="notice-current">
-              <span class="notice-current-label">当前下载目录</span>
-              <span class="notice-current-path pending" id="downloadRootPath">尚未导出过，导出一次后这里会显示实际路径</span>
+      <div class="row-group">
+        <!-- 导出位置说明（可折叠，默认收起） -->
+        <div class="card notice-card">
+          <div class="collapsible-head" id="noticeToggle">
+            <div class="var-header-left">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path>
+                <circle cx="12" cy="10" r="3"></circle>
+              </svg>
+              导出位置说明
+              <span class="var-badge">浏览器下载目录</span>
             </div>
-            <p>
-              <b>怎么改这个目录？</b>只能去浏览器里改：Chrome「设置 → 下载内容 → 位置」→ 更改。改完再导出一次，上面这行会自动更新。扩展本身<b>没有</b>权限修改它，也不会去改。
-            </p>
-            <p>
-              <b>只想单独放一个文件夹？</b>在下方「导出的文件夹及 Markdown 名称」前面加前缀即可。例如填写
-              <code>微信文章/{{date:YYYYMMDD}}_{{title}}</code>，
-              <span class="notice-path">最终位置：上述目录\微信文章\20261023_文章标题\…</span>
-            </p>
-          </div>
-        </div>
-      </div>
-
-      <!-- 版本与更新（可折叠，默认收起；默认不联网，开关打开后才检查） -->
-      <div class="card notice-card">
-        <div class="collapsible-head" id="updateToggle">
-          <div class="var-header-left">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 12a9 9 0 1 1-9-9"></path>
-              <polyline points="21 3 21 9 15 9"></polyline>
-            </svg>
-            版本与更新
-            <span class="var-badge" id="updateBadge">未开启检查</span>
-          </div>
-          <div class="var-header-right">
-            <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="6 9 12 15 18 9"></polyline>
-            </svg>
-          </div>
-        </div>
-
-        <div class="collapsible-body" id="updateBody" style="display:none;">
-          <div class="notice-body">
-            <p>
-              打开下面的开关后，扩展每 24 小时读取一次项目发布的 <code>version.json</code>，
-              只取版本号与更新说明；有新版本时在工具栏图标上显示 <b>NEW</b>。
-            </p>
-          </div>
-
-          <div class="update-panel">
-            <label class="check-row">
-              <input type="checkbox" id="updateNotify">
-              <span class="check-text">
-                <span class="check-title">有新版本时提醒我</span>
-                <span class="check-desc">
-                  检查只下载一个很小的 JSON，不上传任何数据，也不涉及文章内容。
-                  提醒只负责「让你知道」，安装由商店或你自己完成——浏览器不允许扩展自我安装。
-                </span>
-              </span>
-            </label>
-
-            <div class="update-divider"></div>
-
-            <div class="update-row">
-              <span class="update-current">当前版本 <b id="updateCurrent">-</b></span>
-              <button class="btn-secondary" id="updateCheckBtn" type="button">检查更新</button>
+            <div class="var-header-right">
+              <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="6 9 12 15 18 9"></polyline>
+              </svg>
             </div>
-            <div class="update-status" id="updateStatus">尚未检查</div>
-
-            <div class="update-notes" id="updateNotes" style="display:none;">
-              <div class="update-notes-title" id="updateNotesTitle"></div>
-              <pre class="update-notes-body" id="updateNotesBody"></pre>
-              <div class="update-actions">
-                <button class="btn-primary" id="updateGoBtn" type="button">去更新</button>
-                <button class="btn-secondary" id="updateSkipBtn" type="button">忽略此版本</button>
+          </div>
+          <div class="collapsible-body" id="noticeBody" style="display:none;">
+            <div class="notice-body">
+              <p>
+                所有文件都保存在 <b>浏览器的默认下载目录</b> 下。扩展读不到这个设置，只能用「最近一次导出的实际落盘位置」反推出来，结果如下（点一下可整段选中复制）：
+              </p>
+              <div class="notice-current">
+                <span class="notice-current-label">当前下载目录</span>
+                <span class="notice-current-path pending" id="downloadRootPath">尚未导出过，导出一次后这里会显示实际路径</span>
               </div>
+              <p>
+                <b>怎么改这个目录？</b>只能去浏览器里改：Chrome「设置 → 下载内容 → 位置」→ 更改。改完再导出一次，上面这行会自动更新。扩展本身<b>没有</b>权限修改它，也不会去改。
+              </p>
+              <p>
+                <b>只想单独放一个文件夹？</b>在下方「导出的文件夹及 Markdown 名称」前面加前缀即可。例如填写
+                <code>微信文章/{{date:YYYYMMDD}}_{{title}}</code>，
+                <span class="notice-path">最终位置：上述目录\微信文章\20261023_文章标题\…</span>
+              </p>
             </div>
           </div>
         </div>
+
       </div>
 
       <!-- 在线模式配置 -->
@@ -858,6 +881,83 @@
             </div>
           </div>
         </div>
+      </div>
+
+      <!-- 版本与更新 + 链接导出：与上面的配置项分开，放在页面底部 -->
+      <div class="row-group">
+        <!-- 版本与更新（可折叠，默认收起；默认不联网，开关打开后才检查） -->
+        <div class="card notice-card">
+          <div class="collapsible-head" id="updateToggle">
+            <div class="var-header-left">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 12a9 9 0 1 1-9-9"></path>
+                <polyline points="21 3 21 9 15 9"></polyline>
+              </svg>
+              版本与更新
+              <span class="var-badge" id="updateBadge">未开启检查</span>
+            </div>
+            <div class="var-header-right">
+              <svg class="chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="6 9 12 15 18 9"></polyline>
+              </svg>
+            </div>
+          </div>
+
+          <div class="collapsible-body" id="updateBody" style="display:none;">
+            <div class="notice-body">
+              <p>
+                打开下面的开关后，扩展每 24 小时读取一次项目发布的 <code>version.json</code>，
+                只取版本号与更新说明；有新版本时在工具栏图标上显示 <b>NEW</b>。
+              </p>
+            </div>
+
+            <div class="update-panel">
+              <label class="check-row">
+                <input type="checkbox" id="updateNotify">
+                <span class="check-text">
+                  <span class="check-title">有新版本时提醒我</span>
+                  <span class="check-desc">
+                    检查只下载一个很小的 JSON，不上传任何数据，也不涉及文章内容。
+                    提醒只负责「让你知道」，安装由商店或你自己完成——浏览器不允许扩展自我安装。
+                  </span>
+                </span>
+              </label>
+
+              <div class="update-divider"></div>
+
+              <div class="update-row">
+                <span class="update-current">当前版本 <b id="updateCurrent">-</b></span>
+                <button class="btn-secondary" id="updateCheckBtn" type="button">检查更新</button>
+              </div>
+              <div class="update-status" id="updateStatus">尚未检查</div>
+
+              <div class="update-notes" id="updateNotes" style="display:none;">
+                <div class="update-notes-title" id="updateNotesTitle"></div>
+                <pre class="update-notes-body" id="updateNotesBody"></pre>
+                <div class="update-actions">
+                  <button class="btn-primary" id="updateGoBtn" type="button">去更新</button>
+                  <button class="btn-secondary" id="updateSkipBtn" type="button">忽略此版本</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <!-- 链接导出：进入独立页面 -->
+        <a class="nav-card" id="openQueuePage" href="queue.html" target="_blank" rel="noopener" title="在新标签打开链接导出页">
+          <span class="nav-left">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path>
+              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path>
+            </svg>
+            <span>链接导出</span>
+          </span>
+          <span class="nav-right">
+            <span class="nav-sub" id="queueBadge">未开始</span>
+            <svg class="nav-arrow" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="9 18 15 12 9 6"></polyline>
+            </svg>
+          </span>
+        </a>
       </div>
     </div>
   </div>

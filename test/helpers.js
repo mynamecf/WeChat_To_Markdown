@@ -51,13 +51,19 @@ function bodyOf(markdown) {
 /**
  * @param {string} inner        #js_content 里的 HTML
  * @param {object} [settings]   覆盖 chrome.storage.local 的返回值
- * @param {object} [opts]       { title, url, noContent }
+ * @param {object} [opts]       { title, url, noContent, titleHtml, head }
+ *   titleHtml 用来换掉默认的 `#activity-name`（还原「图片消息 / 新版分享页」那种模板）
+ *   head      用来往 <head> 里塞 meta / title
+ *   htmlAttrs 拼到 <html> 上，用来模拟 background 写进来的 data-wxmd-pics 图集桥
  */
 async function render(inner, settings = {}, opts = {}) {
   const url = opts.url || 'https://mp.weixin.qq.com/s/test';
   const title = opts.title || '测试文章';
-  const html = `<!DOCTYPE html><html><body>
-    <h1 id="activity-name">${title}</h1>
+  const titleHtml = opts.titleHtml !== undefined
+    ? opts.titleHtml
+    : `<h1 id="activity-name">${title}</h1>`;
+  const html = `<!DOCTYPE html><html${opts.htmlAttrs ? ' ' + opts.htmlAttrs : ''}><head>${opts.head || ''}</head><body>
+    ${titleHtml}
     <span id="js_name">测试公众号</span>
     <em id="publish_time">2026年11月16日 10:00</em>
     ${opts.noContent ? '' : `<div id="js_content">${inner}</div>`}

@@ -693,15 +693,19 @@ if (mainContainer && backToTopBtn) {
 
 // ---------- 可折叠区块（默认收起） ----------
 
-// 「可用变量」「导出位置说明」「版本与更新」共用同一套折叠行为，避免三处各写一遍
-[['varToggle', 'varBody'], ['noticeToggle', 'noticeBody'], ['updateToggle', 'updateBody']].forEach(pair => {
+// 「可用变量」「导出位置说明」「版本与更新」「按链接导出」共用同一套折叠行为，避免四处各写一遍。
+// 现在几块分处页面不同位置、各自独立展开，不再互相收起。
+[['varToggle', 'varBody'], ['noticeToggle', 'noticeBody'], ['updateToggle', 'updateBody'], ['queueToggle', 'queueBody']].forEach(pair => {
   const head = document.getElementById(pair[0]);
   const body = document.getElementById(pair[1]);
   if (!head || !body) return;
+  // 展开态同时记在卡本体上，整行底色、箭头颜色都跟着它走
+  const card = head.closest('.notice-card');
   head.addEventListener('click', () => {
     const isOpen = body.style.display !== 'none';
     body.style.display = isOpen ? 'none' : 'block';
     head.classList.toggle('open', !isOpen);
+    if (card) card.classList.toggle('open', !isOpen);
   });
 });
 
@@ -1146,3 +1150,91 @@ chrome.storage.onChanged.addListener((changes, area) => {
     && !changes.updateSkipVersion && !changes.updateLastError) return;
   refreshUpdateFromStorage().catch(() => {});
 });
+
+/* ============================================================================
+ * 顶部「链接导出」入口的状态
+ * ----------------------------------------------------------------------------
+ * 队列本身的界面在独立页面（queue.html / queue.js）里，这里只读 storage
+ * 显示一个进度角标，不参与调度，也不发消息。
+ * ========================================================================== */
+
+const queueEntryBadgeEl = document.getElementById('queueBadge');
+
+function renderQueueEntryBadge(items) {
+  if (!queueEntryBadgeEl) return;
+  const list = Array.isArray(items) ? items : [];
+  const count = st => list.filter(i => i.status === st).length;
+  const done = count('done');
+  const failed = count('failed');
+  const running = count('running');
+  const queued = count('queued');
+
+  let text = '未开始';
+  let hot = false;
+  if (running) {
+    text = '导出中 ' + (done + failed + running) + '/' + list.length;
+    hot = true;
+  } else if (queued) {
+    text = '待导出 ' + queued + ' 条';
+  } else if (failed) {
+    text = failed + ' 条失败';
+  } else if (done) {
+    text = '已完成 ' + done + ' 条';
+  }
+
+  queueEntryBadgeEl.textContent = text;
+  queueEntryBadgeEl.classList.toggle('hot', hot);
+}
+
+function refreshQueueEntryBadge() {
+  if (!queueEntryBadgeEl) return;
+  chrome.storage.local.get({ urlQueue: [] }, data => {
+    renderQueueEntryBadge((data && data.urlQueue) || []);
+  });
+}
+
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'local' || !changes.urlQueue) return;
+  renderQueueEntryBadge(changes.urlQueue.newValue || []);
+});
+
+refreshQueueEntryBadge();
+
+// 点「链接导出」：已经开着就切过去，别每次都在新标签里再开一个；
+// 新建时带上 openerTabId，队列页那边才能把「返回配置」精确送回这个标签
+const queueEntryEl = document.getElementById('openQueuePage');
+if (queueEntryEl && chrome.tabs && typeof chrome.tabs.query === 'function'
+  && typeof chrome.tabs.create === 'function') {
+  queueEntryEl.addEventListener('click', async e => {
+    e.preventDefault();
+    const queueUrl = chrome.runtime.getURL('queue.html');
+
+    try {
+      const tabs = await chrome.tabs.query({ url: chrome.runtime.getURL('') + '*' });
+      const opened = tabs
+        .filter(t => String(t.url || '').split('#')[0].split('?')[0] === queueUrl)
+        .sort((a, b) => (b.active ? 1 : 0) - (a.active ? 1 : 0)
+          || (b.lastAccessed || 0) - (a.lastAccessed || 0))[0];
+
+      if (opened) {
+        await chrome.tabs.update(opened.id, { active: true });
+        if (typeof opened.windowId === 'number' && chrome.windows && chrome.windows.update) {
+          await chrome.windows.update(opened.windowId, { focused: true });
+        }
+        return;
+      }
+
+      let me = null;
+      if (typeof chrome.tabs.getCurrent === 'function') {
+        try { me = await chrome.tabs.getCurrent(); } catch (err) { me = null; }
+      }
+      await chrome.tabs.create({
+        url: queueUrl,
+        openerTabId: me && typeof me.id === 'number' ? me.id : undefined
+      });
+    } catch (err) {
+      // 兜底：保持 <a target="_blank"> 的老行为
+      window.open(queueUrl, '_blank', 'noopener');
+    }
+  });
+}

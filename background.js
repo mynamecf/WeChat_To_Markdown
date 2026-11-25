@@ -6,6 +6,8 @@ importScripts('lib/naming.js');
 // 注入清单与 executeScript 结果解析（唯一来源，popup 也引用同一份）
 importScripts('lib/injectlist.js');
 importScripts('lib/download.js');
+// 链接队列的纯逻辑（URL 校验 / 去重 / 状态迁移 / 重试判断），副作用留在本文件
+importScripts('lib/queue.js');
 // 版本检查内核（取 version.json / 比版本号 / 算节流），角标与存储在本文件底部
 importScripts('lib/update.js');
 
@@ -17,6 +19,9 @@ const IMG_CONCURRENCY = 4;          // 图片并发下载上限
 const DOWNLOAD_TIMEOUT = 20000;     // 单个下载超时（ms）
 const MAX_MARKDOWN_BYTES = 1400000; // data URL 上限保护（base64 后约 1.9MB）
 const PROGRESS_MIN_INTERVAL = 500;  // 进度消息节流（ms）
+// 队列导出时等页面加载的上限。必须小于 30s：等待期间没有任何消息往来，
+// 超过空闲阈值 worker 会被回收，泵就断在半路。
+const TAB_LOAD_TIMEOUT = 20000;
 
 // 首次安装时把默认配置落库，保证 popup / options / content 读到同一套值
 chrome.runtime.onInstalled.addListener(async () => {
@@ -73,6 +78,68 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     skipUpdateVersion(message.version)
       .then(() => sendResponse({ ok: true }))
       .catch(err => sendResponse({ ok: false, error: err.message }));
+    return true;
+  }
+
+  // ---------- 链接队列 ----------
+  // 全部「改完存储立刻回包」，泵在后台自己跑：让 sendResponse 等着整套队列跑完，
+  // 配置页会卡住，且 worker 一被回收回包就永远不会来。
+
+  if (message.type === 'QUEUE_ADD') {
+    addQueueItems(message.urls)
+      .then(r => sendResponse({ success: true, ...r }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'QUEUE_GET') {
+    readQueueState()
+      .then(s => sendResponse({
+        success: true,
+        items: s.items,
+        state: s.state,
+        counts: WXMD_QUEUE.counts(s.items),
+        max: WXMD_QUEUE.MAX_ITEMS
+      }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'QUEUE_START') {
+    setQueuePaused(false)
+      .then(() => {
+        sendResponse({ success: true });
+        queuePump();   // 不 await：回包要立刻发出
+      })
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'QUEUE_PAUSE') {
+    setQueuePaused(true)
+      .then(() => sendResponse({ success: true }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'QUEUE_RETRY') {
+    retryQueueItem(message.id)
+      .then(() => sendResponse({ success: true }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'QUEUE_REMOVE') {
+    removeQueueItem(message.id)
+      .then(() => sendResponse({ success: true }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
+    return true;
+  }
+
+  if (message.type === 'QUEUE_CLEAR') {
+    clearFinishedQueueItems()
+      .then(r => sendResponse({ success: true, ...r }))
+      .catch(err => sendResponse({ success: false, error: err.message }));
     return true;
   }
 });
@@ -136,6 +203,10 @@ async function handleExportFromFloating(sender, options) {
         folderMode: opts.folderMode || null
       }]
     });
+
+    // 图片消息的图集先搬到 DOM：用户可能没滚过轮播，DOM 里只有首个空壳项。
+    // 与链接导出走同一个桥，两条入口的取图结果一致。
+    await bridgePictureList(tabId);
 
     const results = await chrome.scripting.executeScript({
       target: { tabId },
@@ -660,6 +731,392 @@ async function rememberDownloadRoot(res, relPath) {
     // 纯展示，失败不影响导出
   }
 }
+
+/* ============================================================================
+ * 链接队列（配置页「按链接导出」）
+ * ----------------------------------------------------------------------------
+ * 一篇文章 = 一个后台标签页：tabs.create(active:false) → 等 complete →
+ * executeScript 注入 WXMD_INJECT_FILES（与弹窗/浮窗完全同一套 pipeline）→
+ * handleExport → 关标签页。content.js 一行都不用改。
+ *
+ * 为什么不做成固定间隔轮询：泵是一个自驱循环，跑完一条立刻取下一条；
+ * chrome.alarms 只在「worker 被回收后接着跑」时兜底（30 秒粒度，正常路径不等它）。
+ * 每条状态都落 storage，所以 worker 中途消失也不会丢进度。
+ * ========================================================================== */
+
+const QUEUE_KEY = 'urlQueue';
+const QUEUE_STATE_KEY = 'queueState';
+const QUEUE_ALARM = 'wxmd-queue-tick';
+const QUEUE_STATE_DEFAULTS = { paused: false, currentId: '', lastError: '' };
+
+function readQueueState() {
+  return chrome.storage.local.get({
+    [QUEUE_KEY]: [],
+    [QUEUE_STATE_KEY]: QUEUE_STATE_DEFAULTS
+  }).then(s => ({
+    items: Array.isArray(s[QUEUE_KEY]) ? s[QUEUE_KEY] : [],
+    state: Object.assign({}, QUEUE_STATE_DEFAULTS, s[QUEUE_STATE_KEY] || {})
+  }));
+}
+
+/**
+ * 读 → 改 → 写 串行化。
+ * 泵和配置页的消息会同时改同一份队列，并发写会出现「后写的覆盖先写的」，
+ * 表现是某条记录凭空少了一次状态更新（比如一直停在 running）。
+ */
+let queueTxChain = Promise.resolve();
+function queueTx(mutator) {
+  const run = queueTxChain.then(async () => {
+    const cur = await readQueueState();
+    const out = await mutator(cur);
+    const items = Array.isArray(out.items) ? out.items : cur.items;
+    const state = out.state || cur.state;
+    await chrome.storage.local.set({ [QUEUE_KEY]: items, [QUEUE_STATE_KEY]: state });
+    return Object.assign({}, out, { items, state });
+  });
+  queueTxChain = run.catch(() => {});
+  return run;
+}
+
+function ensureQueueAlarm(on) {
+  try {
+    if (on) chrome.alarms.create(QUEUE_ALARM, { periodInMinutes: 0.5 });
+    else chrome.alarms.clear(QUEUE_ALARM);
+  } catch (e) {}
+}
+
+async function addQueueItems(raws) {
+  const list = Array.isArray(raws) ? raws : [raws];
+  const out = await queueTx(cur => {
+    const r = WXMD_QUEUE.addItems(cur.items, list, Date.now());
+    return { items: r.items, state: cur.state, added: r.added, skipped: r.skipped };
+  });
+  ensureQueueAlarm(out.items.some(i => i.status === 'queued'));
+  return {
+    added: out.added.length,
+    skipped: out.skipped,
+    total: out.items.length,
+    items: out.items
+  };
+}
+
+async function setQueuePaused(paused) {
+  return queueTx(cur => ({
+    items: cur.items,
+    state: Object.assign({}, cur.state, { paused: !!paused })
+  }));
+}
+
+async function retryQueueItem(id) {
+  return queueTx(cur => ({
+    items: WXMD_QUEUE.patchItem(cur.items, id, {
+      status: WXMD_QUEUE.STATUS.QUEUED,
+      error: '',
+      attempts: 0,      // 手动重试是「用户认为这次能行」，把额度重置
+      tabId: null,
+      finishedAt: 0
+    }),
+    state: Object.assign({}, cur.state, { paused: false })
+  }));
+}
+
+async function removeQueueItem(id) {
+  return queueTx(cur => ({
+    items: WXMD_QUEUE.removeItem(cur.items, id),
+    state: cur.state
+  }));
+}
+
+async function clearFinishedQueueItems() {
+  const out = await queueTx(cur => {
+    const items = WXMD_QUEUE.clearFinished(cur.items);
+    return { items, state: cur.state, removed: cur.items.length - items.length };
+  });
+  ensureQueueAlarm(out.items.some(i => i.status === 'queued'));
+  return { removed: out.removed, items: out.items };
+}
+
+/** 关标签页，失败不抛（可能在等待期间已被用户手动关掉） */
+function removeTabQuietly(tabId) {
+  if (typeof tabId !== 'number') return Promise.resolve();
+  return chrome.tabs.remove(tabId).catch(() => {});
+}
+
+/**
+ * 等标签页加载完。
+ *
+ * 两个坑必须一起处理：
+ *   1. 缓存命中的页面可能在 tabs.create 返回前就已经 complete，那次 onUpdated 已经错过
+ *      → 注册监听后再主动 get 一次
+ *   2. 用户可能把后台标签手动关掉 → 监听 onRemoved，否则会一直等到超时
+ */
+function waitTabComplete(tabId, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = null;
+
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      try { chrome.tabs.onUpdated.removeListener(onUpdated); } catch (e) {}
+      try { chrome.tabs.onRemoved.removeListener(onRemoved); } catch (e) {}
+    };
+    const finish = err => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (err) reject(err);
+      else resolve();
+    };
+    const onUpdated = (id, info) => {
+      if (id === tabId && info && info.status === 'complete') finish(null);
+    };
+    const onRemoved = id => {
+      if (id === tabId) finish(new Error('标签页被关闭'));
+    };
+
+    timer = setTimeout(
+      () => finish(new Error('页面加载超时（' + Math.round(timeoutMs / 1000) + ' 秒）')),
+      timeoutMs
+    );
+    chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.onRemoved.addListener(onRemoved);
+
+    chrome.tabs.get(tabId)
+      .then(t => { if (t && t.status === 'complete') finish(null); })
+      .catch(() => finish(new Error('标签页已关闭')));
+  });
+}
+
+// 图集桥的属性名，lib/imagepost.js 读同一个名字
+const PIC_BRIDGE_ATTR = 'data-wxmd-pics';
+
+/**
+ * 把「图片消息」的全量图集从页面主世界搬进 DOM。
+ *
+ * 为什么需要这一步：图片消息（图文/小绿书）的轮播是虚拟渲染，DOM 里
+ * 只会挂出当前视口附近的一两项（后台标签往往只有一项，还是没有 data-src 的空壳）。
+ * 全量地址只存在页面全局 cgiDataNew.picture_page_info_list 里，而扩展注入的
+ * content.js 跑在 isolated world，读不到页面的 window。
+ *
+ * 所以：主世界（world: 'MAIN'）读全局 → 写进 <html data-wxmd-pics> →
+ * content.js 从 DOM 取。串行队列里每篇只会有一个标签页在跑，不会互相覆盖。
+ * 读不到（普通图文 / 老浏览器 / 注入被拒）就什么都不写，走原来的 DOM 采集。
+ */
+async function bridgePictureList(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: 'MAIN',
+      func: (attr) => {
+        try {
+          // 只在这页确实是「图片消息」时才搬：普通图文里 picture_page_info_list
+          // 一般是空数组，但万一将来带上内嵌图列表，会变成往正文末尾硬塞一堆无关图。
+          const kind = window.cgiDataNew && window.cgiDataNew.item_show_type;
+          const isImagePost = String(kind) === '8'
+            || !!document.querySelector('#js_image_content, #js_image_desc');
+          if (!isImagePost) return;
+
+          const data = (window.cgiDataNew && window.cgiDataNew.picture_page_info_list)
+            || window.picture_page_info_list || [];
+          const urls = [];
+          const seen = {};
+          for (let i = 0; i < data.length; i++) {
+            const item = data[i];
+            let url = item && item.cdn_url;
+            if (typeof url !== 'string') continue;
+            // 页面里存的是被转义过的 &amp;，不还原就取不到原图（404）
+            url = url.replace(/&amp;/g, '&').trim();
+            if (!/^https?:\/\//i.test(url)) continue;
+            const key = url.split('#')[0].split('?')[0];
+            if (seen[key]) continue;
+            seen[key] = true;
+            urls.push(url);
+          }
+          if (urls.length) {
+            document.documentElement.setAttribute(attr, JSON.stringify(urls));
+          }
+        } catch (e) {}
+      },
+      args: [PIC_BRIDGE_ATTR]
+    });
+  } catch (e) {
+    // 主世界注入失败不影响导出：content.js 会退回按 DOM 采集
+  }
+}
+
+/**
+ * 按链接导出单篇。
+ * @param {string} rawUrl
+ * @param {(tabId:number)=>void} [onTab] 拿到 tabId 时回调，供队列记下来做孤儿清理
+ * @returns {Promise<{stats:object, title:string}>}
+ */
+async function exportByUrl(rawUrl, onTab) {
+  const norm = WXMD_QUEUE.normalizeUrl(rawUrl);
+  if (!norm.ok) throw new Error(norm.error);
+
+  const tab = await chrome.tabs.create({ url: norm.url, active: false });
+  const tabId = tab && typeof tab.id === 'number' ? tab.id : null;
+  if (tabId === null) throw new Error('无法创建标签页');
+
+  if (typeof onTab === 'function') {
+    try { await onTab(tabId); } catch (e) {}
+  }
+
+  try {
+    await waitTabComplete(tabId, TAB_LOAD_TIMEOUT);
+
+    // 图片消息的图集先搬到 DOM 上，content.js 在 isolated world 才拿得到
+    await bridgePictureList(tabId);
+
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      files: WXMD_INJECT_FILES
+    });
+    const data = WXMD_pickArticleData(results);
+    if (!data) throw new Error('提取失败（未获取到页面返回数据）');
+    if (!data.success) throw new Error(data.error || '提取失败');
+
+    const stats = await handleExport(data);
+    return { stats, title: data.title || '' };
+  } finally {
+    await removeTabQuietly(tabId);
+  }
+}
+
+// ---------- 队列泵 ----------
+
+let queuePumping = false;
+
+async function runQueueItem(id) {
+  const snap = await readQueueState();
+  const item = snap.items.find(i => i && i.id === id);
+  if (!item) return;
+
+  // 先标 running 再干活：这样 worker 中途被回收时，恢复逻辑能看出「这条是断在半路的」
+  const attempts = (item.attempts || 0) + 1;
+  await queueTx(cur => ({
+    items: WXMD_QUEUE.patchItem(cur.items, id, {
+      status: WXMD_QUEUE.STATUS.RUNNING,
+      attempts,
+      error: '',
+      tabId: null
+    }),
+    state: Object.assign({}, cur.state, { currentId: id, lastError: '' })
+  }));
+
+  try {
+    const res = await exportByUrl(item.url, tabId => {
+      // tabId 要落盘，否则 worker 被回收后这个标签页会永远留在标签栏里
+      queueTx(cur => ({
+        items: WXMD_QUEUE.patchItem(cur.items, id, { tabId }),
+        state: cur.state
+      })).catch(() => {});
+    });
+
+    await queueTx(cur => ({
+      items: WXMD_QUEUE.patchItem(cur.items, id, {
+        status: WXMD_QUEUE.STATUS.DONE,
+        title: res.title || '',
+        error: '',
+        tabId: null,
+        finishedAt: Date.now()
+      }),
+      state: Object.assign({}, cur.state, { currentId: '' })
+    }));
+  } catch (err) {
+    const msg = (err && err.message) || '未知错误';
+    // attempts 已含本次：可重试且没超过上限就放回 queued，泵的下一轮会再取到它
+    const retry = WXMD_QUEUE.isRetryableError(msg) && attempts < WXMD_QUEUE.MAX_ATTEMPTS;
+    await queueTx(cur => ({
+      items: WXMD_QUEUE.patchItem(cur.items, id, {
+        status: retry ? WXMD_QUEUE.STATUS.QUEUED : WXMD_QUEUE.STATUS.FAILED,
+        error: msg,
+        tabId: null,
+        finishedAt: retry ? 0 : Date.now()
+      }),
+      state: Object.assign({}, cur.state, { currentId: '', lastError: msg })
+    }));
+    console.warn('[wx-md] 队列条目失败:', item.url, msg);
+  }
+}
+
+/** 串行跑完所有 queued。同一篇文章不允许两路图片并发（那会把带宽撕成两半） */
+async function queuePump() {
+  if (queuePumping) return;
+  queuePumping = true;
+  try {
+    for (;;) {
+      const snap = await readQueueState();
+      if (snap.state.paused) break;
+      const item = WXMD_QUEUE.nextQueued(snap.items);
+      if (!item) break;
+      await runQueueItem(item.id);
+    }
+  } catch (e) {
+    console.warn('[wx-md] 队列中断:', (e && e.message) || e);
+  } finally {
+    queuePumping = false;
+    const snap = await readQueueState().catch(() => null);
+    if (snap) {
+      ensureQueueAlarm(snap.items.some(i => i.status === 'queued'));
+      if (!snap.state.currentId) {
+        await queueTx(cur => ({
+          items: cur.items,
+          state: Object.assign({}, cur.state, { currentId: '' })
+        })).catch(() => {});
+      }
+    }
+  }
+}
+
+/**
+ * 恢复：把断在半路的 running 项捡回来。
+ * worker 被回收时 finally 不会执行，那条会永远停在 running，泵也就再也取不到它。
+ */
+async function restoreQueue() {
+  const out = await queueTx(cur => {
+    let changed = false;
+    const items = cur.items.map(it => {
+      if (!it || it.status !== WXMD_QUEUE.STATUS.RUNNING) return it;
+      changed = true;
+      // 孤儿标签页必须先关，否则每中断一次就多一个公众号标签
+      removeTabQuietly(it.tabId);
+      const attempts = it.attempts || 0;
+      const retry = attempts < WXMD_QUEUE.MAX_ATTEMPTS;
+      return Object.assign({}, it, {
+        status: retry ? WXMD_QUEUE.STATUS.QUEUED : WXMD_QUEUE.STATUS.FAILED,
+        error: retry ? '' : '导出中断（后台进程被浏览器回收）',
+        tabId: null,
+        finishedAt: retry ? 0 : Date.now()
+      });
+    });
+    return {
+      items,
+      state: changed ? Object.assign({}, cur.state, { currentId: '' }) : cur.state
+    };
+  });
+  return out;
+}
+
+/** 兜底入口：启动 / 装好 / alarm / 任何队列消息都可以调，内部保证幂等 */
+async function queueTick() {
+  try {
+    await restoreQueue();
+    const snap = await readQueueState();
+    const hasPending = snap.items.some(i => i.status === WXMD_QUEUE.STATUS.QUEUED);
+    ensureQueueAlarm(hasPending);
+    if (hasPending && !snap.state.paused) queuePump();
+  } catch (e) {
+    // 队列坏了不能影响手动导出
+  }
+}
+
+chrome.runtime.onInstalled.addListener(() => { queueTick(); });
+chrome.runtime.onStartup.addListener(() => { queueTick(); });
+
+chrome.alarms.onAlarm.addListener(alarm => {
+  if (alarm && alarm.name === QUEUE_ALARM) queueTick();
+});
 
 /* ============================================================================
  * 版本更新提醒

@@ -161,6 +161,43 @@ test('图片消息：正文外的轮播图补到描述文字之后', async () =>
   assert.ok(body.indexOf('一段描述文字') < body.indexOf('{{IMG_0}}'), '图片必须在文字之后');
 });
 
+// 链接导出是在后台标签里跑的，轮播只挂 1 项还是空壳，DOM 里一张原图都没有。
+// 全量图集只在页面主世界的 cgiDataNew 里，background 会把它搬到 <html data-wxmd-pics>。
+test('图片消息：轮播只渲染 1 项时，用图集桥拿到全部 15 张', async () => {
+  const inner = `<div id="js_image_content">
+      <h1 class="rich_media_title">这是标题</h1>
+      <p id="js_image_desc">一段描述文字</p>
+    </div>`;
+  const extra = `<div id="img_list">
+      <div class="swiper_item"><img src="https://mmbiz.qpic.cn/preview1.png?tp=webp"></div>
+    </div>`;
+  const urls = [];
+  for (let i = 0; i < 15; i++) urls.push(`https://mmbiz.qpic.cn/sz_mmbiz_png/${i}/0?wx_fmt=png&amp;from=appmsg`);
+
+  const { images, body } = await render(inner, {}, {
+    extra,
+    htmlAttrs: `data-wxmd-pics='${JSON.stringify(urls)}'`
+  });
+
+  assert.equal(images.length, 15);
+  // 属性里的 &amp; 必须还原，否则下载回来是 404
+  assert.equal(images[0].url, 'https://mmbiz.qpic.cn/sz_mmbiz_png/0/0?wx_fmt=png&from=appmsg');
+  assert.ok(body.indexOf('一段描述文字') < body.indexOf('{{IMG_0}}'), '图片必须在文字之后');
+});
+
+test('图片消息：图集桥读完即删，不会影响下一篇文章', async () => {
+  const inner = `<div id="js_image_content"><p id="js_image_desc">描述</p></div>`;
+  const extra = `<div id="img_list"><div class="swiper_item" data-src="https://mmbiz.qpic.cn/a.png?wx_fmt=png"></div></div>`;
+  const urls = ['https://mmbiz.qpic.cn/bridge1.png?wx_fmt=png'];
+
+  const { result, window } = await render(inner, {}, {
+    extra,
+    htmlAttrs: `data-wxmd-pics='${JSON.stringify(urls)}'`
+  });
+  assert.equal(window.document.documentElement.getAttribute('data-wxmd-pics'), null);
+  assert.equal(result.images.length, 1);
+});
+
 // ---------- 视频号卡片（mp-common-videosnap） ----------
 // 这类卡片没有 <video>、没有 web 播放页：data-url 实测返回的是封面 JPEG，
 // 页面里也没有 channels.weixin.qq.com / weixin:// 之类的可分享地址。
@@ -289,4 +326,46 @@ test('图片保存目录模板：平铺归档用 sharedImageFolder，同样有 {
     { folderMode: 'shared', sharedImageFolder: '{{ext}}' }
   );
   assert.equal(result.imageFolder, 'JPG');
+});
+
+// ---------- 标题：不同模板的标题节点不一样 ----------
+
+// 图片消息（图文 / 小绿书）与新版分享页（body 带 page_share_img）没有 #activity-name，
+// 标题只在 h1.rich_media_title 里；旧实现只认 #activity-name，再退 document.title，
+// 于是这类页面的标题是空的（正文却导得出来，很难看出是标题的问题）。
+test('标题：没有 #activity-name 时取 h1.rich_media_title', async () => {
+  const { result } = await render('<p>正文</p>', {}, {
+    titleHtml: '<h1 class="rich_media_title">图片消息标题</h1>'
+  });
+  assert.equal(result.title, '图片消息标题');
+});
+
+test('标题：只有 og:title（<title> 还是空的时候）也能取到', async () => {
+  const { result } = await render('<p>正文</p>', {}, {
+    titleHtml: '',
+    head: '<meta property="og:title" content="分享页标题">'
+  });
+  assert.equal(result.title, '分享页标题');
+});
+
+test('标题：只剩 document.title 时去掉「微信公众平台」后缀', async () => {
+  const { result } = await render('<p>正文</p>', {}, {
+    titleHtml: '',
+    head: '<title>某文章标题 - 微信公众平台</title>'
+  });
+  assert.equal(result.title, '某文章标题');
+});
+
+test('标题：#activity-name 与 h1.rich_media_title 同时存在时优先 #activity-name', async () => {
+  const { result } = await render('<p>正文</p>', {}, {
+    titleHtml: '<h1 id="activity-name">正式标题</h1><h1 class="rich_media_title">分享标题</h1>'
+  });
+  assert.equal(result.title, '正式标题');
+});
+
+test('标题：视频号 / 文字消息的 js_*_title 节点也认', async () => {
+  const { result } = await render('<p>正文</p>', {}, {
+    titleHtml: '<h1 id="js_video_page_title">视频标题</h1>'
+  });
+  assert.equal(result.title, '视频标题');
 });
