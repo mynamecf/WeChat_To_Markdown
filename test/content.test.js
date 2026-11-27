@@ -415,3 +415,74 @@ test('标题：视频号 / 文字消息的 js_*_title 节点也认', async () =>
   });
   assert.equal(result.title, '视频标题');
 });
+
+test('frontmatter：exported 是带时区偏移的本地时间，且是当前时刻', async () => {
+  const { markdown } = await render('<p>正文</p>');
+  const m = markdown.match(/^exported: '([^']+)'$/m);
+  assert.ok(m, 'frontmatter 里没有 exported:/n' + markdown);
+  const v = m[1];
+  // 必须是 +08:00 / -05:00 这种偏移，不能是 Z —— 否则东八区凌晨导出会退回前一天
+  assert.match(v, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/, '格式不对: ' + v);
+  const t = new Date(v);
+  assert.ok(!Number.isNaN(t.getTime()), '不是合法 ISO 8601: ' + v);
+  assert.ok(Math.abs(Date.now() - t.getTime()) < 60000, 'exported 不是当前时刻: ' + v);
+  // 日期部分要和本地日期一致（凌晨导出不再出现前一天）
+  const pad = n => String(n).padStart(2, '0');
+  const now = new Date();
+  assert.equal(v.slice(0, 10), `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
+    'exported 的日期和本地日期不一致: ' + v);
+});
+
+test('发布时间桥：分享页只有「1月21日」时，用 background 搬来的完整时间', async () => {
+  const { result, window } = await render('<p>正文</p>', {
+    downloadFolder: '{{published:YYYYMMDD}}_{{author}}'
+  }, {
+    timeHtml: '<em id="publish_time">1月21日</em>',
+    htmlAttrs: 'data-wxmd-published="2026-01-21 23:25" data-wxmd-author="小沐读书写作"'
+  });
+
+  assert.equal(result.meta.published, '2026-01-21 23:25', '没有采用桥过来的完整时间');
+  // #js_name 存在时作者仍取 DOM，桥里的作者不该覆盖它（分享页那侧见下面单独用例）
+  assert.equal(result.downloadFolder, '20260121_测试公众号');
+  // frontmatter 里也必须是完整时间，否则跨年无法判断
+  assert.match(result.markdown, /^published: '2026-01-21 23:25'$/m);
+  // 桥属性读完必须删掉，不能留在页面上
+  assert.equal(window.document.documentElement.hasAttribute('data-wxmd-published'), false);
+  assert.equal(window.document.documentElement.hasAttribute('data-wxmd-author'), false);
+});
+
+test('发布时间桥：DOM 已有年份时不被桥数据覆盖', async () => {
+  const { result } = await render('<p>正文</p>', {
+    downloadFolder: '{{published:YYYYMMDD}}'
+  }, {
+    // 普通图文：DOM 里是完整日期，桥里是另一个值（模拟不同类型页面混用）
+    timeHtml: '<em id="publish_time">2026年11月16日 10:00</em>',
+    htmlAttrs: 'data-wxmd-published="2020-01-01 00:00"'
+  });
+  assert.equal(result.meta.published, '2026年11月16日 10:00', 'DOM 原文被桥覆盖了');
+  assert.equal(result.downloadFolder, '20261116');
+});
+
+test('发布时间桥：桥也没拿到时，把「1月21日」补成完整日期', async () => {
+  const { result } = await render('<p>正文</p>', {
+    downloadFolder: '{{published:YYYYMMDD}}'
+  }, {
+    timeHtml: '<em id="publish_time">1月21日</em>'
+  });
+  // 年份由「最近一个已过去的 1月21日」推断，测试不写死今年
+  assert.match(result.meta.published, /^\d{4}-01-21$/, '兜底补全年份失败: ' + result.meta.published);
+  assert.match(result.downloadFolder, /^\d{4}0121$/);
+  // 原文没有时分时不能补一个假的 00:00
+  assert.ok(!/\s00:00/.test(result.meta.published), '凭空造出了 00:00: ' + result.meta.published);
+});
+
+test('公众号名桥：分享页没有 #js_name 时用页面数据里的名字', async () => {
+  const { result } = await render('<p>正文</p>', {
+    downloadFolder: '{{author}}_{{title}}'
+  }, {
+    nameHtml: '',
+    htmlAttrs: 'data-wxmd-author="小沐读书写作"'
+  });
+  assert.equal(result.meta.author, '小沐读书写作');
+  assert.match(result.downloadFolder, /^小沐读书写作_/);
+});

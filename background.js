@@ -206,7 +206,7 @@ async function handleExportFromFloating(sender, options) {
 
     // 图片消息的图集先搬到 DOM：用户可能没滚过轮播，DOM 里只有首个空壳项。
     // 与链接导出走同一个桥，两条入口的取图结果一致。
-    await bridgePictureList(tabId);
+    await bridgePageData(tabId);
 
     const results = await chrome.scripting.executeScript({
       target: { tabId },
@@ -889,25 +889,84 @@ function waitTabComplete(tabId, timeoutMs) {
 
 // 图集桥的属性名，lib/imagepost.js 读同一个名字
 const PIC_BRIDGE_ATTR = 'data-wxmd-pics';
+// 发布时间桥的属性名，content.js 读同一个名字
+const PUB_BRIDGE_ATTR = 'data-wxmd-published';
+// 公众号名桥的属性名，content.js 读同一个名字
+const AUTHOR_BRIDGE_ATTR = 'data-wxmd-author';
 
 /**
- * 把「图片消息」的全量图集从页面主世界搬进 DOM。
+ * 把「页面主世界才拿得到」的数据搬进 DOM，一共两样：
  *
- * 为什么需要这一步：图片消息（图文/小绿书）的轮播是虚拟渲染，DOM 里
- * 只会挂出当前视口附近的一两项（后台标签往往只有一项，还是没有 data-src 的空壳）。
- * 全量地址只存在页面全局 cgiDataNew.picture_page_info_list 里，而扩展注入的
- * content.js 跑在 isolated world，读不到页面的 window。
+ * 1. 图片消息（图文/小绿书）的全量图集 → <html data-wxmd-pics>
+ *    轮播是虚拟渲染，DOM 里只挂当前视口附近的一两项（后台标签往往只有一项、
+ *    还是没有 data-src 的空壳），全量地址只在 cgiDataNew.picture_page_info_list。
  *
- * 所以：主世界（world: 'MAIN'）读全局 → 写进 <html data-wxmd-pics> →
- * content.js 从 DOM 取。串行队列里每篇只会有一个标签页在跑，不会互相覆盖。
+ * 2. 完整发布时间 → <html data-wxmd-published>
+ *    分享页 / 从聊天点开的模板下，#publish_time 只渲染「1月21日」，年份被省掉；
+ *    完整值（2026-01-21 23:25）只存在 cgiDataNew.create_time / ori_create_time。
+ *    扩展注入的 content.js 跑在 isolated world，读不到页面的 window。
+ *
+ * 所以：主世界（world: 'MAIN'）读全局 → 写进 <html data-*> → content.js 从 DOM 取。
+ * 串行队列里每篇只会有一个标签页在跑，不会互相覆盖。
  * 读不到（普通图文 / 老浏览器 / 注入被拒）就什么都不写，走原来的 DOM 采集。
  */
-async function bridgePictureList(tabId) {
+async function bridgePageData(tabId) {
   try {
     await chrome.scripting.executeScript({
       target: { tabId },
       world: 'MAIN',
-      func: (attr) => {
+      func: (picAttr, pubAttr, authAttr) => {
+        // ---------- ① 完整发布时间 ----------
+        try {
+          const c = window.cgiDataNew || window.allData || {};
+          let raw = '';
+
+          const ct = c.create_time;
+          if (typeof ct === 'string' && /\d/.test(ct)) raw = ct.trim();
+          else if (typeof ct === 'number' && ct > 0) raw = String(ct);
+
+          // create_time 拿不到就用 Unix 秒，自己按本地时区格式化
+          // （页面脚本也是这么干的，见 formatTimeToMinute）
+          if (!/\d{4}/.test(raw)) {
+            const ts = +(c.ori_create_time || c.create_timestamp || c.ct || 0);
+            if (ts > 0) {
+              const d = new Date(ts < 1e12 ? ts * 1000 : ts);
+              if (!isNaN(d.getTime())) {
+                const p = n => String(n).padStart(2, '0');
+                raw = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+                  + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+              }
+            }
+          }
+
+          // 纯数字串（有的模板把时间戳当字符串给）按 Unix 秒展开
+          if (/^\d{9,13}$/.test(raw)) {
+            const n = +raw;
+            const d = new Date(n < 1e12 ? n * 1000 : n);
+            if (!isNaN(d.getTime())) {
+              const p = x => String(x).padStart(2, '0');
+              raw = d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+                + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+            }
+          }
+
+          // 只认带年份的完整值：没年份的「1月21日」比 DOM 原文强不了多少，
+          // 写进去反而会让 content.js 跳过后面基于 DOM 的判断
+          if (/^\d{4}\s*[-\/\.年]/.test(raw)) {
+            document.documentElement.setAttribute(pubAttr, raw);
+          }
+        } catch (e) {}
+
+        // ---------- ② 公众号名 ----------
+        // 分享页 / 从聊天点开的模板不渲染 #js_name，正文里一个字都没有，
+        // 但 cgiDataNew.nick_name 是全的。普通图文只有 #js_name 缺失时才会用到它。
+        try {
+          const c = window.cgiDataNew || window.allData || {};
+          const name = String(c.nick_name || '').trim();
+          if (name) document.documentElement.setAttribute(authAttr, name);
+        } catch (e) {}
+
+        // ---------- ③ 图片消息的全量图集 ----------
         try {
           // 只在这页确实是「图片消息」时才搬：普通图文里 picture_page_info_list
           // 一般是空数组，但万一将来带上内嵌图列表，会变成往正文末尾硬塞一堆无关图。
@@ -933,11 +992,11 @@ async function bridgePictureList(tabId) {
             urls.push(url);
           }
           if (urls.length) {
-            document.documentElement.setAttribute(attr, JSON.stringify(urls));
+            document.documentElement.setAttribute(picAttr, JSON.stringify(urls));
           }
         } catch (e) {}
       },
-      args: [PIC_BRIDGE_ATTR]
+      args: [PIC_BRIDGE_ATTR, PUB_BRIDGE_ATTR, AUTHOR_BRIDGE_ATTR]
     });
   } catch (e) {
     // 主世界注入失败不影响导出：content.js 会退回按 DOM 采集
@@ -966,7 +1025,7 @@ async function exportByUrl(rawUrl, onTab) {
     await waitTabComplete(tabId, TAB_LOAD_TIMEOUT);
 
     // 图片消息的图集先搬到 DOM 上，content.js 在 isolated world 才拿得到
-    await bridgePictureList(tabId);
+    await bridgePageData(tabId);
 
     const results = await chrome.scripting.executeScript({
       target: { tabId },

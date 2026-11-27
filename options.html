@@ -820,7 +820,7 @@
               <tbody>
                 <tr><td>{{title}}</td><td>文章标题</td></tr>
                 <tr><td>{{author}}</td><td>公众号名称</td></tr>
-                <tr><td>{{published}}</td><td>文章发布时间，取页面原文（如 2026年11月16日 10:00）</td></tr>
+                <tr><td>{{published}}</td><td>文章发布时间，取页面原文（如 2026年11月16日 10:00）；原文省了年份（如 1月21日）时补成完整日期</td></tr>
                 <tr><td>{{published:x}}</td><td>按指定格式输出发布时间（微信只给到分钟），如 {{published:YYYYMMDD}} → 20261116</td></tr>
                 <tr><td>{{url}}</td><td>文章完整链接</td></tr>
                 <tr><td>{{domain}}</td><td>域名 (mp.weixin.qq.com)</td></tr>
@@ -847,6 +847,9 @@
             </div>
             <div class="format-hint">
               <b>{{published:格式}}</b> 读的是<b>文章发布时间</b>，微信页面只给到分钟（如 <b>2026年11月16日 10:00</b>），所以 <code>ss</code> / <code>s</code> / <code>SSS</code> 用在它上面会输出 <code>00</code> / <code>0</code> / <code>000</code>；要「导出这一刻」的秒或毫秒请用 {{date:格式}} 或 {{time:格式}}。
+            </div>
+            <div class="format-hint">
+              同一个模板在不同文章上要得到同一个形态，请用 <b>{{published:格式}}</b>：不带格式时 {{published}} 是<b>页面原文</b>，普通图文是 <b>2026年11月16日 10:00</b> 这种，分享页（从聊天点开）则是 <b>2026-01-21 23:25</b>——两种模板的原文本来就不一样。
             </div>
 
             <div class="format-grid">

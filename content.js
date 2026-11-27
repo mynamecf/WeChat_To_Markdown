@@ -24,6 +24,10 @@
   const TITLE_SELECTOR = '#activity-name';
   const AUTHOR_SELECTOR = '#js_name';
   const PUBLISH_TIME_SELECTOR = '#publish_time';
+  // background 的 bridgePageData() 写进来的完整发布时间（分享页只有「1月21日」时用）
+  const PUB_BRIDGE_ATTR = 'data-wxmd-published';
+  // 同上，公众号名（分享页不渲染 #js_name）
+  const AUTHOR_BRIDGE_ATTR = 'data-wxmd-author';
 
   // 播放器残留外壳：权威清单在 lib/attachment.js（与那边共用一份，避免两处各改各的），
   // 模块异常时才用这份精简兜底。
@@ -150,10 +154,62 @@
       })();
 
   const authorEl = document.querySelector(AUTHOR_SELECTOR);
-  const author = authorEl ? authorEl.innerText.trim() : '';
+  let author = authorEl ? authorEl.innerText.trim() : '';
 
+  // 取完整发布时间，读完立即删掉桥属性（不留在页面上）。
+  const takeBridgedPublished = () => {
+    try {
+      const root = document.documentElement;
+      const v = root.getAttribute(PUB_BRIDGE_ATTR) || '';
+      if (v) root.removeAttribute(PUB_BRIDGE_ATTR);
+      return v.trim();
+    } catch (e) {
+      return '';
+    }
+  };
+
+  // 分享页的头部不渲染公众号名：正文里找不到 #js_name，但页面数据里是有的。
+  // 只在 DOM 取不到时才采用；不论用不用都读走即删，避免属性残留在页面上。
+  const bridgedAuthor = (() => {
+    try {
+      const root = document.documentElement;
+      const v = (root.getAttribute(AUTHOR_BRIDGE_ATTR) || '').trim();
+      if (v) root.removeAttribute(AUTHOR_BRIDGE_ATTR);
+      return v;
+    } catch (e) {
+      return '';
+    }
+  })();
+  if (!author && bridgedAuthor) author = bridgedAuthor;
+
+  // 分享页 / 从聊天点开的模板里，#publish_time 只渲染「1月21日」，年份被省掉，
+  // 完整值（2026-01-21 23:25）只在页面全局变量里，由背景脚本提前搬到 DOM。
+  // 只在 DOM 缺年份时才用桥数据 —— 普通图文 DOM 已带年份，行为完全不变。
+  let published = '';
   const timeEl = document.querySelector(PUBLISH_TIME_SELECTOR);
-  const published = timeEl ? timeEl.innerText.trim() : '';
+  const domPublished = timeEl ? timeEl.innerText.trim() : '';
+  const bridgedPublished = takeBridgedPublished();
+  if (domPublished && /\d{4}/.test(domPublished)) {
+    published = domPublished;
+  } else {
+    published = bridgedPublished || domPublished;
+  }
+
+  // 桥也没拿到（老浏览器 / 注入被拒）时，DOM 里的「1月21日」仍是残值：
+  // 补成推断出来的完整日期，让 frontmatter 和 {{published}} 至少能排序。
+  // 推断规则见 lib/naming.js 的 parsePublishedDate（最近一个已过去的该月日）。
+  if (published && !/\d{4}/.test(published)
+    && typeof WXMD_NAMING !== 'undefined' && WXMD_NAMING.parsePublishedDate) {
+    const guess = WXMD_NAMING.parsePublishedDate(published);
+    if (guess) {
+      const p = n => String(n).padStart(2, '0');
+      const day = `${guess.getFullYear()}-${p(guess.getMonth() + 1)}-${p(guess.getDate())}`;
+      // 原文没写时分时不要补 00:00 —— 那等于编了一个「凌晨发布」
+      published = /\d{1,2}:\d{2}/.test(published)
+        ? `${day} ${p(guess.getHours())}:${p(guess.getMinutes())}`
+        : day;
+    }
+  }
 
   const url = location.href;
   const articleMeta = {
@@ -483,13 +539,34 @@
     .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
     .replace(/'/g, "''") + "'";
 
+  /**
+   * 本地时区的 ISO 8601 时间戳（带偏移，如 2026-11-27T01:19:18.123+08:00）。
+   *
+   * 为什么不用 toISOString()：它固定输出 UTC，末尾是 Z。东八区凌晨 0–8 点导出的
+   * 文件，日期会退回前一天（01:19 写成前一天 17:19），按日期排序直接错位，
+   * 看上去像「时间不是实时的」——其实时刻没错，只是换了参照系。
+   *
+   * 这里用系统时区偏移拼出 +08:00 / -05:00，日期与本地一致，仍是合法 ISO 8601，
+   * Dataview、dayjs 都能直接解析，调用方不用再补时区。跨时区导出时偏移跟随系统，
+   * 所以不同机器上仍能还原出各自的真实时刻。
+   */
+  const toLocalIso = d => {
+    const p = (n, w) => String(n).padStart(w || 2, '0');
+    const off = -d.getTimezoneOffset();          // 分钟；东八区是 480
+    const abs = Math.abs(off);
+    return p(d.getFullYear(), 4) + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate())
+      + 'T' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds())
+      + '.' + p(d.getMilliseconds(), 3)
+      + (off >= 0 ? '+' : '-') + p(Math.floor(abs / 60)) + ':' + p(abs % 60);
+  };
+
   const frontmatter =
     '---\n' +
     `title: ${yamlStr(title)}\n` +
     `author: ${yamlStr(author)}\n` +
     `source: ${yamlStr(url)}\n` +
     `published: ${yamlStr(published)}\n` +
-    `exported: ${yamlStr(new Date().toISOString())}\n` +
+    `exported: ${yamlStr(toLocalIso(new Date()))}\n` +
     '---\n\n';
 
   markdown = frontmatter + markdown + '\n';

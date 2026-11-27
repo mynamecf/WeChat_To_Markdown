@@ -203,3 +203,53 @@ test('extFromUrl：tp > 路径 webp > wx_fmt > 前缀 > 文件后缀', () => {
   assert.equal(N.extFromUrl('https://example.com/a/b.gif'), 'gif');
   assert.equal(N.extFromUrl(''), 'jpg');
 });
+
+test('parsePublishedDate：无年份的「1月21日」按最近一个已过去的该月日推断', () => {
+  // 分享页 / 从聊天点开的模板只在「当年」省略年份，所以月日一定在最近 12 个月内
+  const d = N.parsePublishedDate('1月21日');
+  assert.ok(d, '无年份日期解析不出:' + d);
+  assert.equal(d.getMonth(), 0);
+  assert.equal(d.getDate(), 21);
+
+  const now = new Date();
+  const thisYear = new Date(now.getFullYear(), 0, 21);
+  // 未来的月日要退一年，否则会生成一个「还没到」的日期
+  const expected = thisYear.getTime() - now.getTime() > 86400000
+    ? now.getFullYear() - 1
+    : now.getFullYear();
+  assert.equal(d.getFullYear(), expected);
+
+  // 带时分、横杠分隔、全角数字都要认
+  const t = N.parsePublishedDate('1月21日 23:25');
+  assert.equal(t.getHours(), 23);
+  assert.equal(t.getMinutes(), 25);
+  assert.ok(N.parsePublishedDate('01-21'));
+  assert.ok(N.parsePublishedDate('１月２１日'));
+});
+
+test('parsePublishedDate：跨年与非法值', () => {
+  const now = new Date();
+  // 「12月30日」在当前日期之前就是今年，之后就是去年 —— 两种情况都不该落到明年
+  const dec = N.parsePublishedDate('12月30日');
+  assert.ok(dec);
+  assert.ok(dec.getFullYear() === now.getFullYear() || dec.getFullYear() === now.getFullYear() - 1);
+  assert.ok(dec.getTime() <= now.getTime() + 86400000);
+
+  assert.equal(N.parsePublishedDate('1月32日'), null);
+  assert.equal(N.parsePublishedDate('13月1日'), null);
+  // 已经带 4 位年份的不能被「无年份」分支二次匹配成 01-21
+  const full = N.parsePublishedDate('2026-01-21 23:25');
+  assert.equal(full.getFullYear(), 2026);
+
+  assert.equal(N.parsePublishedDate('昨天'), null);
+  assert.equal(N.parsePublishedDate('3 天前'), null);
+});
+
+test('{{published:格式}}：原文缺年份时仍能输出完整日期', () => {
+  const meta = { published: '1月21日', title: '文笔不好' };
+  const out = N.resolveTemplate('{{published:YYYYMMDD}}_{{title}}', 0, 'u', meta);
+  assert.match(out, /^\d{8}_文笔不好$/, '日期段没渲染出来: ' + out);
+  assert.ok(out.slice(4, 6) === '01', '月份不对: ' + out);
+  assert.ok(out.slice(6, 8) === '21', '日不对: ' + out);
+  assert.match(N.resolveTemplate('{{published:YYYY/MM}}', 0, 'u', meta, true), /^\d{4}\/01$/);
+});

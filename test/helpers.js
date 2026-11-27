@@ -52,9 +52,11 @@ function bodyOf(markdown) {
  * @param {string} inner        #js_content 里的 HTML
  * @param {object} [settings]   覆盖 chrome.storage.local 的返回值
  * @param {object} [opts]       { title, url, noContent, titleHtml, head }
- *   titleHtml 用来换掉默认的 `#activity-name`（还原「图片消息 / 新版分享页」那种模板）
- *   head      用来往 <head> 里塞 meta / title
- *   htmlAttrs 拼到 <html> 上，用来模拟 background 写进来的 data-wxmd-pics 图集桥
+ *   titleHtml   用来换掉默认的 `#activity-name`（还原「图片消息 / 新版分享页」那种模板）
+ *   head        用来往 <head> 里塞 meta / title
+ *   htmlAttrs   拼到 <html> 上，用来模拟 background 写进来的 data-wxmd-* 桥
+ *   nameHtml    换掉默认的 `<span id="js_name">`（分享页不渲染公众号名，传空串）
+ *   timeHtml    换掉默认的 `<em id="publish_time">`（分享页只给「1月21日」，不传年份）
  */
 async function render(inner, settings = {}, opts = {}) {
   const url = opts.url || 'https://mp.weixin.qq.com/s/test';
@@ -62,10 +64,16 @@ async function render(inner, settings = {}, opts = {}) {
   const titleHtml = opts.titleHtml !== undefined
     ? opts.titleHtml
     : `<h1 id="activity-name">${title}</h1>`;
+  const nameHtml = opts.nameHtml !== undefined
+    ? opts.nameHtml
+    : '<span id="js_name">测试公众号</span>';
+  const timeHtml = opts.timeHtml !== undefined
+    ? opts.timeHtml
+    : '<em id="publish_time">2026年11月16日 10:00</em>';
   const html = `<!DOCTYPE html><html${opts.htmlAttrs ? ' ' + opts.htmlAttrs : ''}><head>${opts.head || ''}</head><body>
     ${titleHtml}
-    <span id="js_name">测试公众号</span>
-    <em id="publish_time">2026年11月16日 10:00</em>
+    ${nameHtml}
+    ${timeHtml}
     ${opts.noContent ? '' : `<div id="js_content">${inner}</div>`}
     ${opts.extra || ''}
   </body></html>`;
